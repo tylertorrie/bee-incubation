@@ -1,0 +1,23 @@
+# Database — synced separately via OneDrive, NOT via git
+*.db
+*.db-shm
+*.db-wal
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Desktop shortcut / icon artefacts
+*.ico
+*.lnk
+*.ps1
+
+# VS Code / editor folders
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
+.DS_Store

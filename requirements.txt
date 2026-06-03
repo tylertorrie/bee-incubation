@@ -1,0 +1,12 @@
+# Bee Incubation Manager — dependencies
+# Install with: pip install -r requirements.txt
+
+customtkinter>=5.2.0
+pillow>=10.0.0
+qrcode[pil]>=7.4.2
+flask>=3.0.0
+requests>=2.31.0
+openpyxl>=3.1.0
+
+# VOC / Vapona monitor
+matplotlib>=3.8.0
