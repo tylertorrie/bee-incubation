@@ -104,8 +104,7 @@ def init_db():
                 capacity        INTEGER DEFAULT 50,
                 govee_device_id TEXT    DEFAULT '',
                 govee_sku       TEXT    DEFAULT '',
-                temp_min        REAL    DEFAULT 26.0,
-                temp_max        REAL    DEFAULT 29.0,
+                temp_mode       TEXT    DEFAULT 'incubation',
                 humidity_min    REAL    DEFAULT 55.0,
                 humidity_max    REAL    DEFAULT 75.0,
                 sort_order      INTEGER DEFAULT 0,
@@ -202,7 +201,8 @@ def init_db():
             )
 
         # Safe migrations — add columns introduced after the initial schema
-        _safe_add_column(conn, "incubators", "is_hidden", "INTEGER DEFAULT 0")
+        _safe_add_column(conn, "incubators", "is_hidden",  "INTEGER DEFAULT 0")
+        _safe_add_column(conn, "incubators", "temp_mode",  "TEXT DEFAULT 'incubation'")
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -228,16 +228,16 @@ def get_incubators(include_hidden: bool = False) -> list:
     """
     with get_conn() as conn:
         if include_hidden:
-            sql = "SELECT * FROM incubators ORDER BY is_hidden, sort_order, name"
+            sql = "SELECT * FROM incubators ORDER BY is_hidden, name"
             return [dict(r) for r in conn.execute(sql).fetchall()]
         return [dict(r) for r in conn.execute(
-            "SELECT * FROM incubators WHERE is_hidden=0 ORDER BY sort_order, name"
+            "SELECT * FROM incubators WHERE is_hidden=0 ORDER BY name"
         ).fetchall()]
 
 
 def upsert_incubator(data: dict) -> int:
     cols = ["name", "capacity", "govee_device_id", "govee_sku",
-            "temp_min", "temp_max", "humidity_min", "humidity_max",
+            "temp_mode", "humidity_min", "humidity_max",
             "sort_order", "is_hidden"]
     with get_conn() as conn:
         if data.get("id"):
@@ -257,6 +257,13 @@ def set_incubator_hidden(incubator_id: int, hidden: bool):
     with get_conn() as conn:
         conn.execute("UPDATE incubators SET is_hidden=? WHERE id=?",
                      (1 if hidden else 0, incubator_id))
+
+
+def set_incubator_temp_mode(incubator_id: int, mode: str):
+    """Switch temp mode for an incubator ('cool_storage'|'incubation'|'holding')."""
+    with get_conn() as conn:
+        conn.execute("UPDATE incubators SET temp_mode=? WHERE id=?",
+                     (mode, incubator_id))
 
 
 def delete_incubator(incubator_id: int):

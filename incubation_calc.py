@@ -136,6 +136,25 @@ def get_all_events(batches: list, lookahead_days: int = 30) -> list:
     return sorted(events, key=lambda x: x["days_away"])
 
 
+# ── Temperature mode presets ──────────────────────────────────────────────────
+
+TEMP_MODES = {
+    "cool_storage": {"label": "Cool Storage",  "min":  0.0, "max": 12.0},
+    "incubation":   {"label": "Incubation",     "min": 25.0, "max": 35.0},
+    "holding":      {"label": "Holding Temp",   "min": 10.0, "max": 18.0},
+}
+
+# Reverse lookup: display label → mode key
+_MODE_BY_LABEL = {v["label"]: k for k, v in TEMP_MODES.items()}
+
+
+def get_temp_range(incubator: dict) -> tuple:
+    """Return (min_c, max_c) for the incubator's current temp_mode."""
+    mode = incubator.get("temp_mode") or "incubation"
+    cfg  = TEMP_MODES.get(mode, TEMP_MODES["incubation"])
+    return cfg["min"], cfg["max"]
+
+
 # ── Threshold checks ──────────────────────────────────────────────────────────
 
 def check_temp_humidity(incubator: dict,
@@ -148,8 +167,7 @@ def check_temp_humidity(incubator: dict,
     problems = []
     name = incubator.get("name", f"Incubator {incubator.get('id', '?')}")
 
-    t_min = float(incubator.get("temp_min") or 26.0)
-    t_max = float(incubator.get("temp_max") or 29.0)
+    t_min, t_max = get_temp_range(incubator)
     h_min = float(incubator.get("humidity_min") or 55.0)
     h_max = float(incubator.get("humidity_max") or 75.0)
 

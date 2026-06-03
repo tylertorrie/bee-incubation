@@ -150,7 +150,7 @@ class IncubatorDialog(ctk.CTkToplevel):
         self.on_save = on_save
         self.inc = inc or {}
         self.title("Edit Incubator" if inc else "Add Incubator")
-        self.geometry("440x560")
+        self.geometry("460x500")
         self.resizable(False, False)
         self.grab_set()
         self._build()
@@ -158,7 +158,6 @@ class IncubatorDialog(ctk.CTkToplevel):
             self._populate()
 
     def _build(self):
-        pad = {"padx": 20, "pady": (14, 0)}
         f = ctk.CTkScrollableFrame(self, fg_color="transparent")
         f.pack(fill="both", expand=True, padx=4, pady=4)
         f.columnconfigure(1, weight=1)
@@ -169,8 +168,6 @@ class IncubatorDialog(ctk.CTkToplevel):
             ("Capacity (trays)",  "50",           "capacity"),
             ("Govee Device ID",   "AB:CD:EF:...", "govee_device_id"),
             ("Govee SKU / Model", "H5075",        "govee_sku"),
-            ("Temp Min (°C)",     "26.0",         "temp_min"),
-            ("Temp Max (°C)",     "29.0",         "temp_max"),
             ("Humidity Min (%)",  "55",           "humidity_min"),
             ("Humidity Max (%)",  "75",           "humidity_max"),
         ]
@@ -179,9 +176,22 @@ class IncubatorDialog(ctk.CTkToplevel):
             r = _FormRow(f, i, lbl, ph, width=240)
             self._rows[key] = r
 
-        # Sort order
-        sort_lbl = _FormRow(f, len(rows), "Sort Order", "0", width=240)
-        self._rows["sort_order"] = sort_lbl
+        # Temp mode selector
+        n = len(rows)
+        _label(f, "Temp Mode", FONT_S, SUBTEXT).grid(
+            row=n, column=0, sticky="e", padx=(14, 8), pady=8)
+        self._mode_var = ctk.StringVar(value="Incubation")
+        mode_names = [v["label"] for v in calc.TEMP_MODES.values()]
+        self._mode_seg = ctk.CTkSegmentedButton(
+            f, values=mode_names, variable=self._mode_var, width=290)
+        self._mode_seg.grid(row=n, column=1, sticky="w", padx=8, pady=8)
+
+        # Range hint label (updates as mode changes)
+        n2 = n + 1
+        self._range_hint = _label(f, "", FONT_S, SUBTEXT)
+        self._range_hint.grid(row=n2, column=1, sticky="w", padx=8, pady=(0, 4))
+        self._mode_var.trace_add("write", self._update_range_hint)
+        self._update_range_hint()
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.pack(fill="x", padx=20, pady=14)
@@ -189,9 +199,18 @@ class IncubatorDialog(ctk.CTkToplevel):
              text_color="black", width=130).pack(side="right", padx=4)
         _btn(btns, "Cancel", self.destroy, width=100).pack(side="right")
 
+    def _update_range_hint(self, *_):
+        label = self._mode_var.get()
+        key   = calc._MODE_BY_LABEL.get(label, "incubation")
+        cfg   = calc.TEMP_MODES[key]
+        self._range_hint.configure(text=f"Alert range: {cfg['min']}–{cfg['max']} °C")
+
     def _populate(self):
         for key, row in self._rows.items():
             row.set(self.inc.get(key, ""))
+        mode_key = self.inc.get("temp_mode", "incubation")
+        mode_cfg = calc.TEMP_MODES.get(mode_key, calc.TEMP_MODES["incubation"])
+        self._mode_var.set(mode_cfg["label"])
 
     def _save(self):
         data = {k: v for k, v in ((k, r.get()) for k, r in self._rows.items()) if v != ""}
@@ -199,16 +218,18 @@ class IncubatorDialog(ctk.CTkToplevel):
             messagebox.showerror("Error", "Name is required.", parent=self)
             return
         data["id"] = self.inc.get("id")
-        for fld in ("capacity", "sort_order"):
-            try:
-                data[fld] = int(data[fld])
-            except (KeyError, ValueError, TypeError):
-                data[fld] = 0
-        for fld in ("temp_min", "temp_max", "humidity_min", "humidity_max"):
+        try:
+            data["capacity"] = int(data.get("capacity", 50))
+        except (ValueError, TypeError):
+            data["capacity"] = 50
+        for fld in ("humidity_min", "humidity_max"):
             try:
                 data[fld] = float(data[fld])
             except (KeyError, ValueError, TypeError):
                 pass
+        # Temp mode from segmented button
+        label = self._mode_var.get()
+        data["temp_mode"] = calc._MODE_BY_LABEL.get(label, "incubation")
         db.upsert_incubator(data)
         if self.on_save:
             self.on_save()
@@ -893,6 +914,14 @@ class IncubationApp(ctk.CTk):
         hdr.pack(fill="x", padx=14, pady=(12, 4))
         name_txt = f"{inc['name']}  (hidden)" if is_hidden else inc["name"]
         _label(hdr, name_txt, FONT_H, title_col).pack(side="left")
+        # Temp mode chip
+        mode_key = inc.get("temp_mode", "incubation")
+        mode_cfg = calc.TEMP_MODES.get(mode_key, calc.TEMP_MODES["incubation"])
+        ctk.CTkLabel(hdr, text=mode_cfg["label"],
+                     font=("Segoe UI", 9, "bold"),
+                     fg_color="#1E3A5F", text_color="#7DD3FC",
+                     corner_radius=4, height=20,
+                     padx=6).pack(side="left", padx=(8, 0))
 
         reading = self._govee.get_last(inc["id"])
         temp_c  = reading.get("temp_c")
@@ -912,7 +941,8 @@ class IncubationApp(ctk.CTk):
         if temp_c is not None:
             unit = db.get_setting("temp_unit", "C")
             t_str = calc.format_temp(temp_c, unit)
-            t_col = GREEN if float(inc.get("temp_min",26)) <= temp_c <= float(inc.get("temp_max",29)) else RED
+            t_min, t_max = calc.get_temp_range(inc)
+            t_col = GREEN if t_min <= temp_c <= t_max else RED
             h_col = GREEN if float(inc.get("humidity_min",55)) <= hum <= float(inc.get("humidity_max",75)) else RED
             _label(rf, f"🌡 {t_str}", FONT_B, t_col).pack(
                 side="left", padx=12, pady=6)
@@ -1041,8 +1071,10 @@ class IncubationApp(ctk.CTk):
             else:
                 _label(left, "No sensor reading", FONT_B, SUBTEXT).pack(anchor="w")
 
+            _mode_key = inc.get("temp_mode", "incubation")
+            _mode_cfg = calc.TEMP_MODES.get(_mode_key, calc.TEMP_MODES["incubation"])
             info_txt = (f"Capacity: {inc.get('capacity',50)} trays  |  "
-                        f"T: {inc.get('temp_min',26)}–{inc.get('temp_max',29)}°C  |  "
+                        f"{_mode_cfg['label']}: {_mode_cfg['min']}–{_mode_cfg['max']}°C  |  "
                         f"H: {inc.get('humidity_min',55)}–{inc.get('humidity_max',75)}%")
             _label(left, info_txt, FONT_S, SUBTEXT).pack(anchor="w")
 
@@ -1635,7 +1667,7 @@ class IncubationApp(ctk.CTk):
 
         # Header row with name + quick Inspect button
         hdr = ctk.CTkFrame(win, fg_color="transparent")
-        hdr.pack(fill="x", padx=16, pady=(12, 4))
+        hdr.pack(fill="x", padx=16, pady=(12, 2))
         _label(hdr, inc["name"], FONT_H, GOLD).pack(side="left")
 
         # Live M/E badges in header
@@ -1649,6 +1681,32 @@ class IncubationApp(ctk.CTk):
         _btn(hdr, "Inspect Now", lambda i=inc: self._open_inspection_form(i),
              width=110, height=30, fg=BLUE, hover="#1D4ED8",
              text_color="white").pack(side="right")
+
+        # Temp mode switcher row
+        mrow = ctk.CTkFrame(win, fg_color="transparent")
+        mrow.pack(fill="x", padx=16, pady=(0, 6))
+        _label(mrow, "Temp Mode:", FONT_S, SUBTEXT).pack(side="left", padx=(0, 8))
+        _det_mode_key = inc.get("temp_mode", "incubation")
+        _det_mode_cfg = calc.TEMP_MODES.get(_det_mode_key, calc.TEMP_MODES["incubation"])
+        _det_mode_var = ctk.StringVar(value=_det_mode_cfg["label"])
+        _det_range_lbl = _label(mrow, f"{_det_mode_cfg['min']}–{_det_mode_cfg['max']} °C",
+                                FONT_S, SUBTEXT)
+
+        def _on_detail_mode(label, iid=inc["id"], rlbl=_det_range_lbl, rv=_det_mode_var):
+            key = calc._MODE_BY_LABEL.get(label, "incubation")
+            db.set_incubator_temp_mode(iid, key)
+            cfg = calc.TEMP_MODES[key]
+            rlbl.configure(text=f"{cfg['min']}–{cfg['max']} °C")
+            self._refresh_current()
+
+        ctk.CTkSegmentedButton(
+            mrow,
+            values=[v["label"] for v in calc.TEMP_MODES.values()],
+            variable=_det_mode_var,
+            command=_on_detail_mode,
+            width=300, height=28
+        ).pack(side="left")
+        _det_range_lbl.pack(side="left", padx=(12, 0))
 
         tabs = ctk.CTkTabview(win, fg_color=CARD)
         tabs.pack(fill="both", expand=True, padx=12, pady=8)
