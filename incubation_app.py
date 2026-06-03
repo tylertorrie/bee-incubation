@@ -731,7 +731,8 @@ class IncubationApp(ctk.CTk):
         self._start_qr_server()
         self._start_alert_checker()
         self._start_email_scheduler()
-        self._git_pull()        # pull latest code from GitHub on startup
+        self._git_pull()            # immediate pull on startup
+        self._start_auto_sync()     # then every 10 minutes
 
         # Refresh status bar periodically
         self._tick()
@@ -2215,6 +2216,32 @@ class IncubationApp(ctk.CTk):
                 print(f"[git pull] {exc}")
 
         threading.Thread(target=_pull, daemon=True, name="GitPull").start()
+
+    def _start_auto_sync(self):
+        """Pull from GitHub every 10 minutes — picks up pushes from the other computer."""
+        def _loop():
+            while True:
+                time.sleep(600)   # 10 minutes
+                try:
+                    import subprocess
+                    app_dir = os.path.dirname(os.path.abspath(__file__))
+                    result  = subprocess.run(
+                        ["git", "-C", app_dir, "pull", "--ff-only"],
+                        capture_output=True, text=True, timeout=20,
+                    )
+                    if result.returncode == 0:
+                        msg = (result.stdout.strip() or "").lower()
+                        if msg and "already up to date" not in msg:
+                            # New commits were pulled — notify in status bar
+                            self.after(0, lambda m=result.stdout.strip():
+                                self._set_git_status(f"Updated: {m}", ok=True))
+                            print(f"[AutoSync] {result.stdout.strip()}")
+                except FileNotFoundError:
+                    pass   # git not on PATH
+                except Exception as exc:
+                    print(f"[AutoSync] {exc}")
+
+        threading.Thread(target=_loop, daemon=True, name="AutoSync").start()
 
     def _set_git_status(self, msg: str, ok: bool):
         """Flash a brief git status message in the status bar."""
