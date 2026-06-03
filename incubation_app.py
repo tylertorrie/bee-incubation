@@ -688,16 +688,33 @@ class AlertsDialog(ctk.CTkToplevel):
 class IncubationApp(ctk.CTk):
 
     def __init__(self):
+        # Tell Windows this is a distinct app so it gets its own taskbar button + icon
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "BeeIncubation.Manager.1")
+        except Exception:
+            pass
+
         super().__init__()
         db.init_db()
         voc_db.init_voc_tables()
         inspection_db.init_inspection_tables()
         _treeview_style()
 
-        self.title("🐝 Bee Incubation Manager")
+        self.title("Bee Incubation Manager")
         self.geometry("1280x800")
         self.minsize(1000, 680)
         self.configure(fg_color="#0F172A")
+
+        # Apply logo icon to title bar and taskbar
+        _app_dir  = os.path.dirname(os.path.abspath(__file__))
+        _ico_path = os.path.join(_app_dir, "bee.ico")
+        if os.path.exists(_ico_path):
+            try:
+                self.iconbitmap(_ico_path)
+            except Exception:
+                pass
 
         # Govee client
         self._govee = govee_mod.GoveeClient(
@@ -744,10 +761,28 @@ class IncubationApp(ctk.CTk):
         sb.pack(side="left", fill="y")
         sb.pack_propagate(False)
 
-        _label(sb, "🐝 Incubation", ("Segoe UI", 15, "bold"), GOLD).pack(
-            pady=(20, 4), padx=16, anchor="w")
+        # Logo image — show if logo.png exists, otherwise fall back to text
+        _logo_png = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+        if os.path.exists(_logo_png):
+            try:
+                from PIL import Image as _PILImage
+                import customtkinter as _ctk2
+                _raw = _PILImage.open(_logo_png).convert("RGBA")
+                # Make white background transparent
+                _data = _raw.getdata()
+                _raw.putdata([(r, g, b, 0) if r > 230 and g > 230 and b > 230
+                              else (r, g, b, a) for r, g, b, a in _data])
+                _ctk_img = ctk.CTkImage(light_image=_raw, dark_image=_raw, size=(54, 54))
+                ctk.CTkLabel(sb, image=_ctk_img, text="").pack(pady=(18, 2))
+            except Exception:
+                _label(sb, "🐝", ("Segoe UI", 30), GOLD).pack(pady=(18, 2))
+        else:
+            _label(sb, "🐝", ("Segoe UI", 30), GOLD).pack(pady=(18, 2))
+
+        _label(sb, "Incubation", ("Segoe UI", 13, "bold"), GOLD).pack(
+            pady=(0, 2), padx=16, anchor="center")
         _label(sb, "Bee Manager", FONT_S, SUBTEXT).pack(
-            pady=(0, 16), padx=16, anchor="w")
+            pady=(0, 14), padx=16, anchor="center")
 
         nav_items = [
             ("🏠  Dashboard",     "dashboard"),

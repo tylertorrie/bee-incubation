@@ -13,6 +13,7 @@ __pycache__/
 *.pyd
 
 # Desktop shortcut / icon artefacts
+# (logo.png is tracked — it's the source asset)
 *.ico
 *.lnk
 *.ps1

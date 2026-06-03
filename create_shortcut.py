@@ -2,14 +2,13 @@
 create_shortcut.py  —  One-time setup script for the Bee Incubation Manager.
 
 Creates:
-  1. bee.ico    — custom bee icon (drawn with Pillow)
-  2. Desktop shortcut (.lnk) that always runs the live .py source
+  1. bee.ico    — app icon from logo.png (falls back to drawn bee if missing)
+  2. Desktop shortcut (.lnk) that launches the app
 
 Run once:
     python create_shortcut.py
 
-Re-run any time you move the folder to update the shortcut path.
-The app itself auto-picks up code changes because it runs the .py directly.
+Re-run any time you move the folder or replace logo.png to update icons.
 """
 import os
 import sys
@@ -52,84 +51,64 @@ if not PYTHONW.exists():
 
 # ── Icon generation ───────────────────────────────────────────────────────────
 
-def _draw_bee(size: int):
-    """Draw a bee at the given pixel size; return RGBA PIL Image."""
-    from PIL import Image, ImageDraw
+LOGO_PNG = APP_DIR / "logo.png"   # source image — place your logo here
 
+
+def _make_transparent(img):
+    """Convert white / near-white pixels to transparent (for clean icon on dark taskbar)."""
+    img = img.convert("RGBA")
+    data = img.getdata()
+    new_data = []
+    for r, g, b, a in data:
+        if r > 230 and g > 230 and b > 230:   # white or near-white background
+            new_data.append((r, g, b, 0))
+        else:
+            new_data.append((r, g, b, a))
+    img.putdata(new_data)
+    return img
+
+
+def _draw_bee_fallback(size: int):
+    """Simple fallback bee drawn with Pillow — only used if logo.png is missing."""
+    from PIL import Image, ImageDraw
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d   = ImageDraw.Draw(img)
     s   = float(size)
-
-    def r(x0, y0, x1, y1):
-        return [round(x0 * s), round(y0 * s), round(x1 * s), round(y1 * s)]
-
-    def p(x, y):
-        return (round(x * s), round(y * s))
-
-    def lw(frac):
-        return max(1, round(frac * s))
-
-    # Wings (semi-transparent, drawn behind body)
-    d.ellipse(r(0.03, 0.08, 0.44, 0.52), fill=(200, 220, 255, 155))
-    d.ellipse(r(0.56, 0.08, 0.97, 0.52), fill=(200, 220, 255, 155))
-    d.ellipse(r(0.08, 0.36, 0.44, 0.62), fill=(180, 210, 255, 120))
-    d.ellipse(r(0.56, 0.36, 0.92, 0.62), fill=(180, 210, 255, 120))
-
-    # Body (yellow oval)
-    d.ellipse(r(0.23, 0.28, 0.77, 0.92),
-              fill="#FFD700", outline="#9A6B00", width=lw(0.04))
-
-    # Black stripes (3 bands)
-    xl, xr = round(0.26 * s), round(0.74 * s)
-    stripe_offsets = [0.40, 0.52, 0.64]
-    stripe_h       = 0.08
-    for yo in stripe_offsets:
-        d.rectangle([xl + lw(0.03), round(yo * s),
-                     xr - lw(0.03), round((yo + stripe_h) * s)],
-                    fill="#1A1400")
-
-    # Head
-    d.ellipse(r(0.31, 0.11, 0.69, 0.36),
-              fill="#2A1E00", outline="#1A1400", width=lw(0.03))
-
-    # Eyes (white)
-    er = lw(0.055)
-    for ex, ey in [(0.41, 0.22), (0.59, 0.22)]:
-        cx, cy = round(ex * s), round(ey * s)
-        d.ellipse([cx - er, cy - er, cx + er, cy + er], fill="white")
-
-    # Antennae
-    aw = lw(0.045)
-    d.line([p(0.42, 0.14), p(0.27, 0.02)], fill="#2A1E00", width=aw)
-    d.line([p(0.58, 0.14), p(0.73, 0.02)], fill="#2A1E00", width=aw)
-    dr = lw(0.07)
-    for ax, ay in [(0.26, 0.02), (0.74, 0.02)]:
-        cx, cy = round(ax * s), round(ay * s)
-        d.ellipse([cx - dr, cy - dr, cx + dr, cy + dr], fill="#2A1E00")
-
-    # Stinger
-    d.polygon([p(0.50, 0.97), p(0.42, 0.88), p(0.58, 0.88)], fill="#9A6B00")
-
+    r   = lambda x0, y0, x1, y1: [round(x0*s), round(y0*s), round(x1*s), round(y1*s)]
+    lw  = lambda f: max(1, round(f * s))
+    d.ellipse(r(0.03,0.08,0.44,0.52), fill=(200,220,255,155))
+    d.ellipse(r(0.56,0.08,0.97,0.52), fill=(200,220,255,155))
+    d.ellipse(r(0.23,0.28,0.77,0.92), fill="#FFD700", outline="#9A6B00", width=lw(0.04))
+    for yo in [0.40, 0.52, 0.64]:
+        d.rectangle([round(0.29*s), round(yo*s), round(0.71*s), round((yo+0.08)*s)], fill="#1A1400")
+    d.ellipse(r(0.31,0.11,0.69,0.36), fill="#2A1E00")
     return img
 
 
 def make_icon() -> str | None:
-    """Generate bee.ico at multiple sizes. Returns path string or None on failure."""
+    """
+    Build bee.ico from logo.png (transparent background, multiple sizes).
+    Falls back to the drawn bee if logo.png is not present.
+    Returns the .ico path string, or None on failure.
+    """
     try:
-        from PIL import Image  # noqa: F401
+        from PIL import Image
     except ImportError:
-        print("  [icon] Pillow not installed — shortcut will use the Python icon.")
+        print("  [icon] Pillow not installed — skipping icon.")
         return None
 
-    # Draw at 256×256 (highest quality); Pillow downsamples to smaller sizes
-    base   = _draw_bee(256)
-    sizes  = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-    base.save(
-        str(ICON_PATH),
-        format="ICO",
-        sizes=sizes,
-    )
-    print(f"  [icon] Saved: {ICON_PATH}")
+    if LOGO_PNG.exists():
+        print(f"  [icon] Using {LOGO_PNG.name}")
+        base = _make_transparent(Image.open(LOGO_PNG))
+        base = base.resize((256, 256), Image.LANCZOS)
+    else:
+        print(f"  [icon] logo.png not found — using drawn bee fallback.")
+        print(f"         (Copy your logo PNG to {LOGO_PNG} and re-run to update.)")
+        base = _draw_bee_fallback(256)
+
+    sizes = [(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)]
+    base.save(str(ICON_PATH), format="ICO", sizes=sizes)
+    print(f"  [icon] Saved {ICON_PATH.name}")
     return str(ICON_PATH)
 
 
