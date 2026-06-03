@@ -1362,6 +1362,50 @@ class IncubationApp(ctk.CTk):
         self._qr_ip_lbl = _label(qf, "", FONT_S, BLUE)
         self._qr_ip_lbl.grid(row=2, column=1, sticky="w", padx=4, pady=2)
 
+        # ── Data Storage ──────────────────────────────────────────────────────
+        dsf = ctk.CTkFrame(scroll, fg_color=CARD, corner_radius=10)
+        dsf.pack(fill="x", padx=4, pady=(8, 2))
+        _label(dsf, "Data Storage", FONT_H, GOLD).pack(
+            anchor="w", padx=14, pady=(10, 2))
+        _label(dsf,
+               "Move the database to your Google Drive folder so data syncs\n"
+               "between computers automatically. The app restarts after saving.",
+               FONT_S, SUBTEXT).pack(anchor="w", padx=14, pady=(0, 8))
+
+        dsg = ctk.CTkFrame(dsf, fg_color=CARD2, corner_radius=8)
+        dsg.pack(fill="x", padx=14, pady=(0, 14))
+
+        # Current path row
+        path_row = ctk.CTkFrame(dsg, fg_color="transparent")
+        path_row.pack(fill="x", padx=12, pady=(10, 4))
+        _label(path_row, "Current database:", FONT_S, SUBTEXT).pack(side="left")
+        self._db_path_lbl = _label(path_row, db.DB_PATH, FONT_S, BLUE)
+        self._db_path_lbl.pack(side="left", padx=(8, 0))
+
+        # New path entry row
+        new_row = ctk.CTkFrame(dsg, fg_color="transparent")
+        new_row.pack(fill="x", padx=12, pady=(4, 10))
+        _label(new_row, "Move database to:", FONT_S, SUBTEXT).pack(side="left")
+        self._db_folder_entry = ctk.CTkEntry(
+            new_row, placeholder_text="Paste or browse to a folder…",
+            fg_color=CARD, border_color=BORDER, text_color=TEXT, width=320)
+        self._db_folder_entry.pack(side="left", padx=(8, 6))
+        _btn(new_row, "Browse", self._browse_db_folder,
+             width=80, height=28, fg=BORDER, hover=CARD2).pack(side="left")
+
+        # Status / hint
+        self._db_move_status = _label(dsg, "", FONT_S, SUBTEXT)
+        self._db_move_status.pack(anchor="w", padx=12, pady=(0, 4))
+
+        # Action buttons
+        act_row = ctk.CTkFrame(dsg, fg_color="transparent")
+        act_row.pack(fill="x", padx=12, pady=(0, 10))
+        _btn(act_row, "Move & Restart", self._move_database,
+             fg=DK_GOLD, hover=GOLD, text_color="black",
+             width=140, height=30).pack(side="left", padx=(0, 8))
+        _btn(act_row, "Use Local File (default)", self._use_local_db,
+             fg=BORDER, hover=CARD2, width=180, height=30).pack(side="left")
+
         return frame
 
     def _refresh_settings(self):
@@ -1384,6 +1428,73 @@ class IncubationApp(ctk.CTk):
         # Update govee key live
         self._govee.set_api_key(db.get_setting("govee_api_key"))
         messagebox.showinfo("Settings", "Settings saved.", parent=self)
+
+    # ── Data storage helpers ──────────────────────────────────────────────────
+
+    def _browse_db_folder(self):
+        folder = filedialog.askdirectory(
+            title="Choose a folder for the database "
+                  "(e.g. your Google Drive folder)",
+            mustexist=True,
+        )
+        if folder:
+            self._db_folder_entry.delete(0, "end")
+            self._db_folder_entry.insert(0, folder)
+            self._db_move_status.configure(
+                text=f"Will save to: {folder}\\incubation.db",
+                text_color=SUBTEXT)
+
+    def _move_database(self):
+        import shutil
+        folder = self._db_folder_entry.get().strip()
+        if not folder:
+            self._db_move_status.configure(
+                text="Please browse to or paste a folder path first.",
+                text_color=ORANGE)
+            return
+        if not os.path.isdir(folder):
+            self._db_move_status.configure(
+                text="That folder doesn't exist. Create it first or pick a different one.",
+                text_color=RED)
+            return
+
+        new_path = os.path.join(folder, "incubation.db")
+
+        if os.path.exists(new_path):
+            if not messagebox.askyesno(
+                    "File already exists",
+                    f"A database already exists at:\n{new_path}\n\n"
+                    "Overwrite it with your current data?",
+                    parent=self):
+                return
+
+        # Copy current DB to new location
+        try:
+            shutil.copy2(db.DB_PATH, new_path)
+        except Exception as exc:
+            self._db_move_status.configure(
+                text=f"Copy failed: {exc}", text_color=RED)
+            return
+
+        # Save new path to config so next launch uses it
+        db.save_config({"db_path": new_path})
+
+        messagebox.showinfo(
+            "Done — please restart",
+            f"Database copied to:\n{new_path}\n\n"
+            "Close and reopen the app to start using the new location.\n\n"
+            "Tip: on your other computer, go to Settings and click\n"
+            "'Move & Restart', then browse to the same Google Drive folder.",
+            parent=self)
+
+    def _use_local_db(self):
+        """Reset to default local file (remove any configured path)."""
+        db.save_config({"db_path": ""})
+        messagebox.showinfo(
+            "Done — please restart",
+            "Database location reset to the default (next to the app files).\n"
+            "Restart the app for the change to take effect.",
+            parent=self)
 
     def _test_govee(self):
         key = self._set["govee_api_key"].get()

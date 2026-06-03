@@ -1,7 +1,10 @@
-# Database — synced separately via OneDrive, NOT via git
+# Database — synced separately via Google Drive / cloud, NOT via git
 *.db
 *.db-shm
 *.db-wal
+
+# Local config — stores per-machine DB path, not shared via git
+incubation_config.json
 
 # Python cache
 __pycache__/

@@ -7,41 +7,67 @@ import sqlite3
 import os
 from datetime import datetime
 
+_SRC_DIR    = os.path.dirname(os.path.abspath(__file__))
+_CONFIG_FILE = os.path.join(_SRC_DIR, "incubation_config.json")
+
+
+def _load_config() -> dict:
+    """Read the small JSON config file that stores the user-chosen DB path."""
+    try:
+        import json
+        with open(_CONFIG_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_config(data: dict):
+    """Persist config (db_path etc.) to disk."""
+    import json
+    cfg = _load_config()
+    cfg.update(data)
+    with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+
+
 def _resolve_db_path() -> str:
     """
     Locate the database file.
 
-    Priority:
-      1. INCUBATION_DB environment variable   — explicit override, useful for
-                                                OneDrive/cross-device setups
-      2. Next to this source file             — used whenever the DB already
-                                                exists there (existing installs)
-      3. OneDrive\\Documents\\BeeIncubation\\  — only for brand-new installs
-                                                where no local DB exists yet
-      4. Next to this source file (fallback)  — if OneDrive not found either
+    Priority order:
+      1. incubation_config.json  db_path key  — set from the Settings UI
+      2. incubation.db next to the source files — used whenever the DB already
+                                                  exists there (protects existing data)
+      3. Google Drive folder     — auto-detected for new installs so data syncs
+                                   between computers without any extra setup
+      4. Fallback: next to source files
 
-    Using os.path.abspath ensures the path is stable regardless of which
-    directory the app is launched from.
+    No OneDrive logic — Google Drive is used exclusively for cloud sync.
     """
-    # 1. Explicit override (e.g. set INCUBATION_DB=C:\path\to\incubation.db)
-    env = os.environ.get("INCUBATION_DB")
-    if env:
-        os.makedirs(os.path.dirname(os.path.abspath(env)), exist_ok=True)
-        return env
+    # 1. User-configured path (set via Settings ▸ Data Storage)
+    cfg = _load_config()
+    if cfg.get("db_path"):
+        path = cfg["db_path"]
+        folder = os.path.dirname(path)
+        if folder:
+            os.makedirs(folder, exist_ok=True)
+        return path
 
-    # Canonical path next to this source file
-    local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "incubation.db")
+    # Canonical local path
+    local = os.path.join(_SRC_DIR, "incubation.db")
 
-    # 2. If a database already lives next to the source files, always use it.
-    #    This covers every existing install — never silently moves data.
+    # 2. Existing local DB — never silently move data
     if os.path.exists(local):
         return local
 
-    # 3. New install — prefer OneDrive so data syncs to other computers
-    for var in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
-        root = os.environ.get(var)
-        if root and os.path.isdir(root):
-            data_dir = os.path.join(root, "Documents", "BeeIncubation")
+    # 3. Google Drive — new installs only
+    #    Google Drive for Desktop mirrors to one of these folder names
+    home = os.path.expanduser("~")
+    for folder_name in ("Google Drive", "My Drive", "Google Drive My Drive",
+                        "GoogleDrive", "Google Drive/My Drive"):
+        gd = os.path.join(home, folder_name)
+        if os.path.isdir(gd):
+            data_dir = os.path.join(gd, "BeeIncubation")
             os.makedirs(data_dir, exist_ok=True)
             return os.path.join(data_dir, "incubation.db")
 
