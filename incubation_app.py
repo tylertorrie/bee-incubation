@@ -53,6 +53,7 @@ ctk.set_default_color_theme("blue")
 GOLD      = "#FFD700"
 DK_GOLD   = "#B8860B"
 GREEN     = "#4CAF50"
+TEAL      = "#10B981"
 ORANGE    = "#FF9800"
 RED       = "#F44336"
 BLUE      = "#3B82F6"
@@ -799,6 +800,15 @@ class IncubationApp(ctk.CTk):
         _btn(hdr, "Refresh", self._refresh_dashboard,
              fg="transparent", hover=CARD, width=90).pack(side="right", padx=6)
 
+        # "Show hidden" toggle — only visible when hidden incubators exist
+        self._dash_show_hidden = ctk.BooleanVar(value=False)
+        self._dash_hidden_btn  = ctk.CTkButton(
+            hdr, text="", width=150, height=28,
+            fg_color=CARD2, hover_color=BORDER, text_color=SUBTEXT,
+            corner_radius=6, font=FONT_S,
+            command=self._toggle_dash_hidden)
+        # packed conditionally in _refresh_dashboard
+
         self._dash_scroll = ctk.CTkScrollableFrame(
             frame, fg_color="transparent", corner_radius=0)
         self._dash_scroll.pack(fill="both", expand=True, padx=12, pady=4)
@@ -806,16 +816,40 @@ class IncubationApp(ctk.CTk):
         frame._card_container = self._dash_scroll
         return frame
 
+    def _toggle_dash_hidden(self):
+        self._dash_show_hidden.set(not self._dash_show_hidden.get())
+        self._refresh_dashboard()
+
     def _refresh_dashboard(self):
         container = self._dash_scroll
         for w in container.winfo_children():
             w.destroy()
 
-        incubators = db.get_incubators()
+        show_hidden = getattr(self, "_dash_show_hidden", None)
+        show_hidden = show_hidden.get() if show_hidden else False
+        all_inc     = db.get_incubators(include_hidden=True)
+        hidden_n    = sum(1 for i in all_inc if i.get("is_hidden"))
+        incubators  = all_inc if show_hidden else [i for i in all_inc if not i.get("is_hidden")]
+
+        # Update the "show/hide hidden" button visibility and label
+        if hidden_n > 0:
+            lbl = (f"Hide {hidden_n} hidden" if show_hidden
+                   else f"Show {hidden_n} hidden")
+            self._dash_hidden_btn.configure(text=lbl)
+            self._dash_hidden_btn.pack(side="right", padx=6)
+        else:
+            self._dash_hidden_btn.pack_forget()
+
         if not incubators:
             ctk.CTkFrame(container, fg_color="transparent").pack(pady=40)
-            _label(container, "No incubators yet.\nClick '+ Incubator' to add one.",
-                   FONT_B, SUBTEXT).pack()
+            if hidden_n > 0:
+                _label(container,
+                       f"All {hidden_n} incubator(s) are hidden.\n"
+                       "Click 'Show hidden' above or manage them in the Incubators view.",
+                       FONT_B, SUBTEXT).pack()
+            else:
+                _label(container, "No incubators yet.\nClick '+ Incubator' to add one.",
+                       FONT_B, SUBTEXT).pack()
             return
 
         # Summary row
@@ -846,13 +880,19 @@ class IncubationApp(ctk.CTk):
                       padx=6, pady=6, sticky="nsew")
 
     def _make_inc_card(self, parent, inc: dict) -> ctk.CTkFrame:
-        card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=12,
-                            border_width=1, border_color=BORDER)
+        is_hidden  = bool(inc.get("is_hidden"))
+        card_bg    = "#161E2C" if is_hidden else CARD
+        title_col  = SUBTEXT  if is_hidden else GOLD
+        bdr_col    = "#222D3D" if is_hidden else BORDER
+
+        card = ctk.CTkFrame(parent, fg_color=card_bg, corner_radius=12,
+                            border_width=1, border_color=bdr_col)
 
         # ── Header ──
         hdr = ctk.CTkFrame(card, fg_color="transparent")
         hdr.pack(fill="x", padx=14, pady=(12, 4))
-        _label(hdr, inc["name"], FONT_H, GOLD).pack(side="left")
+        name_txt = f"{inc['name']}  (hidden)" if is_hidden else inc["name"]
+        _label(hdr, name_txt, FONT_H, title_col).pack(side="left")
 
         reading = self._govee.get_last(inc["id"])
         temp_c  = reading.get("temp_c")
@@ -904,25 +944,38 @@ class IncubationApp(ctk.CTk):
             _label(card, "No upcoming events", FONT_S, SUBTEXT).pack(
                 padx=14, anchor="w", pady=2)
 
-        # ── Inspection status badges ──
-        brow = ctk.CTkFrame(card, fg_color="transparent")
-        brow.pack(fill="x", padx=12, pady=(4, 2))
-        _label(brow, "Inspections:", FONT_S, SUBTEXT).pack(side="left", padx=(2, 6))
-        make_status_badges(brow, inc["id"]).pack(side="left")
+        # ── Inspection status badges (only when visible) ──
+        if not is_hidden:
+            brow = ctk.CTkFrame(card, fg_color="transparent")
+            brow.pack(fill="x", padx=12, pady=(4, 2))
+            _label(brow, "Inspections:", FONT_S, SUBTEXT).pack(side="left", padx=(2, 6))
+            make_status_badges(brow, inc["id"]).pack(side="left")
 
         # ── Buttons ──
         bf = ctk.CTkFrame(card, fg_color="transparent")
         bf.pack(fill="x", padx=8, pady=(4, 10))
-        _btn(bf, "Details", lambda i=inc: self._open_inc_detail_window(i),
-             width=80, height=28, fg=BORDER, hover=CARD2).pack(side="left", padx=4)
-        _btn(bf, "+ Batch", lambda i=inc["id"]: self._open_batch_dialog(incubator_id=i),
-             width=78, height=28, fg=BORDER, hover=CARD2).pack(side="left", padx=2)
-        _btn(bf, "Inspect", lambda i=inc: self._open_inspection_form(i),
-             width=90, height=28, fg=BLUE, hover="#1D4ED8",
-             text_color="white").pack(side="left", padx=2)
-        _btn(bf, "+ Tray", lambda i=inc["id"]: self._open_tray_dialog(incubator_id=i),
-             width=75, height=28, fg=DK_GOLD, hover=GOLD,
-             text_color="black").pack(side="right", padx=4)
+
+        if is_hidden:
+            # Hidden card — just Unhide + Details
+            _btn(bf, "Unhide", lambda i=inc["id"]: self._set_hidden(i, False),
+                 width=90, height=28, fg="#065F46", hover=TEAL,
+                 text_color="white").pack(side="left", padx=4)
+            _btn(bf, "Details", lambda i=inc: self._open_inc_detail_window(i),
+                 width=80, height=28, fg=BORDER, hover=CARD2).pack(side="left", padx=2)
+        else:
+            _btn(bf, "Details", lambda i=inc: self._open_inc_detail_window(i),
+                 width=80, height=28, fg=BORDER, hover=CARD2).pack(side="left", padx=4)
+            _btn(bf, "+ Batch", lambda i=inc["id"]: self._open_batch_dialog(incubator_id=i),
+                 width=78, height=28, fg=BORDER, hover=CARD2).pack(side="left", padx=2)
+            _btn(bf, "Inspect", lambda i=inc: self._open_inspection_form(i),
+                 width=90, height=28, fg=BLUE, hover="#1D4ED8",
+                 text_color="white").pack(side="left", padx=2)
+            _btn(bf, "Hide", lambda i=inc["id"]: self._set_hidden(i, True),
+                 width=60, height=28, fg=CARD2, hover=BORDER,
+                 text_color=SUBTEXT).pack(side="left", padx=2)
+            _btn(bf, "+ Tray", lambda i=inc["id"]: self._open_tray_dialog(incubator_id=i),
+                 width=75, height=28, fg=DK_GOLD, hover=GOLD,
+                 text_color="black").pack(side="right", padx=4)
 
         return card
 
@@ -950,18 +1003,33 @@ class IncubationApp(ctk.CTk):
             w.destroy()
 
         incubators = db.get_incubators()
+        incubators = db.get_incubators(include_hidden=True)
         if not incubators:
             _label(container, "No incubators yet.", FONT_B, SUBTEXT).pack(pady=20)
             return
 
         for inc in incubators:
-            row = ctk.CTkFrame(container, fg_color=CARD, corner_radius=10,
-                               border_width=1, border_color=BORDER)
+            hidden    = bool(inc.get("is_hidden"))
+            row_bg    = "#161E2C" if hidden else CARD
+            bdr_col   = "#222D3D" if hidden else BORDER
+            name_col  = SUBTEXT  if hidden else GOLD
+
+            row = ctk.CTkFrame(container, fg_color=row_bg, corner_radius=10,
+                               border_width=1, border_color=bdr_col)
             row.pack(fill="x", padx=4, pady=4)
 
             left = ctk.CTkFrame(row, fg_color="transparent")
             left.pack(side="left", fill="both", expand=True, padx=14, pady=10)
-            _label(left, inc["name"], FONT_H, GOLD).pack(anchor="w")
+
+            # Name + hidden badge
+            name_row = ctk.CTkFrame(left, fg_color="transparent")
+            name_row.pack(anchor="w", fill="x")
+            _label(name_row, inc["name"], FONT_H, name_col).pack(side="left")
+            if hidden:
+                ctk.CTkLabel(name_row, text="  HIDDEN  ",
+                             fg_color="#374151", text_color=SUBTEXT,
+                             corner_radius=4, font=("Segoe UI", 9, "bold"),
+                             height=20).pack(side="left", padx=8)
 
             reading = self._govee.get_last(inc["id"])
             temp_c  = reading.get("temp_c")
@@ -982,18 +1050,31 @@ class IncubationApp(ctk.CTk):
                          f"({inc.get('govee_sku') or '—'})")
             _label(left, govee_txt, FONT_S, SUBTEXT).pack(anchor="w")
 
-            # Inspection status badges
-            ibrow = ctk.CTkFrame(left, fg_color="transparent")
-            ibrow.pack(anchor="w", pady=(4, 0))
-            _label(ibrow, "Inspections:", FONT_S, SUBTEXT).pack(side="left", padx=(0, 6))
-            make_status_badges(ibrow, inc["id"]).pack(side="left")
+            # Inspection status badges (only for visible incubators)
+            if not hidden:
+                ibrow = ctk.CTkFrame(left, fg_color="transparent")
+                ibrow.pack(anchor="w", pady=(4, 0))
+                _label(ibrow, "Inspections:", FONT_S, SUBTEXT).pack(side="left", padx=(0, 6))
+                make_status_badges(ibrow, inc["id"]).pack(side="left")
 
             right = ctk.CTkFrame(row, fg_color="transparent")
             right.pack(side="right", padx=14, pady=10)
-            _btn(right, "Inspect",
-                 lambda i=inc: self._open_inspection_form(i),
-                 width=80, height=28, fg=BLUE, hover="#1D4ED8",
-                 text_color="white").pack(pady=2)
+
+            if hidden:
+                _btn(right, "Unhide",
+                     lambda i=inc["id"]: self._set_hidden(i, False),
+                     width=80, height=28, fg="#065F46", hover=TEAL,
+                     text_color="white").pack(pady=2)
+            else:
+                _btn(right, "Inspect",
+                     lambda i=inc: self._open_inspection_form(i),
+                     width=80, height=28, fg=BLUE, hover="#1D4ED8",
+                     text_color="white").pack(pady=2)
+                _btn(right, "Hide",
+                     lambda i=inc["id"]: self._set_hidden(i, True),
+                     width=80, height=28, fg=CARD2, hover=BORDER,
+                     text_color=SUBTEXT).pack(pady=2)
+
             _btn(right, "Edit",
                  lambda i=inc: self._open_incubator_dialog(i),
                  width=80, height=28, fg=BORDER, hover=CARD2).pack(pady=2)
@@ -1521,6 +1602,10 @@ class IncubationApp(ctk.CTk):
         if messagebox.askyesno("Delete", "Delete this incubator?"):
             db.delete_incubator(iid)
             self._refresh_current()
+
+    def _set_hidden(self, iid: int, hidden: bool):
+        db.set_incubator_hidden(iid, hidden)
+        self._refresh_current()
 
     def _open_alerts(self):
         AlertsDialog(self, on_ack=self._refresh_alert_badge)

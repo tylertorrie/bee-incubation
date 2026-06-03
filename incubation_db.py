@@ -9,23 +9,35 @@ from datetime import datetime
 
 def _resolve_db_path() -> str:
     """
-    Locate the database, preferring a OneDrive folder so data
-    syncs automatically between computers.
+    Locate the database file.
 
     Priority:
-      1. INCUBATION_DB environment variable  (explicit override)
-      2. OneDrive\\Documents\\BeeIncubation\\  (auto-detected)
-      3. Same folder as this file             (fallback / first run)
+      1. INCUBATION_DB environment variable   — explicit override, useful for
+                                                OneDrive/cross-device setups
+      2. Next to this source file             — used whenever the DB already
+                                                exists there (existing installs)
+      3. OneDrive\\Documents\\BeeIncubation\\  — only for brand-new installs
+                                                where no local DB exists yet
+      4. Next to this source file (fallback)  — if OneDrive not found either
 
-    The chosen folder is created if it doesn't exist yet.
+    Using os.path.abspath ensures the path is stable regardless of which
+    directory the app is launched from.
     """
-    # 1. Explicit override
+    # 1. Explicit override (e.g. set INCUBATION_DB=C:\path\to\incubation.db)
     env = os.environ.get("INCUBATION_DB")
     if env:
-        os.makedirs(os.path.dirname(env), exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(env)), exist_ok=True)
         return env
 
-    # 2. OneDrive  (Windows sets %OneDrive% or %OneDriveConsumer%)
+    # Canonical path next to this source file
+    local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "incubation.db")
+
+    # 2. If a database already lives next to the source files, always use it.
+    #    This covers every existing install — never silently moves data.
+    if os.path.exists(local):
+        return local
+
+    # 3. New install — prefer OneDrive so data syncs to other computers
     for var in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
         root = os.environ.get(var)
         if root and os.path.isdir(root):
@@ -33,11 +45,12 @@ def _resolve_db_path() -> str:
             os.makedirs(data_dir, exist_ok=True)
             return os.path.join(data_dir, "incubation.db")
 
-    # 3. Fallback — next to the source files
-    return os.path.join(os.path.dirname(__file__), "incubation.db")
+    # 4. Fallback
+    return local
 
 
 DB_PATH = _resolve_db_path()
+print(f"[DB] {DB_PATH}")
 
 
 def get_conn() -> sqlite3.Connection:
@@ -45,6 +58,14 @@ def get_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def _safe_add_column(conn, table: str, column: str, definition: str):
+    """Add a column to a table only if it doesn't already exist."""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except sqlite3.OperationalError:
+        pass  # Column already exists — that's fine
 
 
 def init_db():
@@ -61,7 +82,8 @@ def init_db():
                 temp_max        REAL    DEFAULT 29.0,
                 humidity_min    REAL    DEFAULT 55.0,
                 humidity_max    REAL    DEFAULT 75.0,
-                sort_order      INTEGER DEFAULT 0
+                sort_order      INTEGER DEFAULT 0,
+                is_hidden       INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS samples (
@@ -153,6 +175,9 @@ def init_db():
                 (key, value)
             )
 
+        # Safe migrations — add columns introduced after the initial schema
+        _safe_add_column(conn, "incubators", "is_hidden", "INTEGER DEFAULT 0")
+
 
 def get_setting(key: str, default: str = "") -> str:
     with get_conn() as conn:
@@ -170,15 +195,24 @@ def set_setting(key: str, value: str):
 
 # ── Incubators ────────────────────────────────────────────────────────────────
 
-def get_incubators() -> list:
+def get_incubators(include_hidden: bool = False) -> list:
+    """Return incubators ordered by sort_order then name.
+    Hidden incubators are excluded by default; pass include_hidden=True
+    to get the full list (used by the management view).
+    """
     with get_conn() as conn:
-        return [dict(r) for r in
-                conn.execute("SELECT * FROM incubators ORDER BY sort_order, name").fetchall()]
+        if include_hidden:
+            sql = "SELECT * FROM incubators ORDER BY is_hidden, sort_order, name"
+            return [dict(r) for r in conn.execute(sql).fetchall()]
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM incubators WHERE is_hidden=0 ORDER BY sort_order, name"
+        ).fetchall()]
 
 
 def upsert_incubator(data: dict) -> int:
     cols = ["name", "capacity", "govee_device_id", "govee_sku",
-            "temp_min", "temp_max", "humidity_min", "humidity_max", "sort_order"]
+            "temp_min", "temp_max", "humidity_min", "humidity_max",
+            "sort_order", "is_hidden"]
     with get_conn() as conn:
         if data.get("id"):
             sets = ", ".join(f"{c}=?" for c in cols)
@@ -190,6 +224,13 @@ def upsert_incubator(data: dict) -> int:
             f"INSERT INTO incubators ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})",
             vals)
         return cur.lastrowid
+
+
+def set_incubator_hidden(incubator_id: int, hidden: bool):
+    """Show or hide an incubator without deleting it."""
+    with get_conn() as conn:
+        conn.execute("UPDATE incubators SET is_hidden=? WHERE id=?",
+                     (1 if hidden else 0, incubator_id))
 
 
 def delete_incubator(incubator_id: int):
