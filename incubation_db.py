@@ -5,7 +5,7 @@ Tables: incubators, samples, incubation_batches, trays,
 """
 import sqlite3
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 _SRC_DIR    = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_FILE = os.path.join(_SRC_DIR, "incubation_config.json")
@@ -104,11 +104,12 @@ def init_db():
                 capacity        INTEGER DEFAULT 50,
                 govee_device_id TEXT    DEFAULT '',
                 govee_sku       TEXT    DEFAULT '',
-                temp_mode       TEXT    DEFAULT 'incubation',
-                humidity_min    REAL    DEFAULT 55.0,
-                humidity_max    REAL    DEFAULT 75.0,
-                sort_order      INTEGER DEFAULT 0,
-                is_hidden       INTEGER DEFAULT 0
+                temp_mode            TEXT    DEFAULT 'incubation',
+                temp_alerts_enabled  INTEGER DEFAULT 1,
+                humidity_min         REAL    DEFAULT 55.0,
+                humidity_max         REAL    DEFAULT 75.0,
+                sort_order           INTEGER DEFAULT 0,
+                is_hidden            INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS samples (
@@ -201,8 +202,9 @@ def init_db():
             )
 
         # Safe migrations — add columns introduced after the initial schema
-        _safe_add_column(conn, "incubators", "is_hidden",  "INTEGER DEFAULT 0")
-        _safe_add_column(conn, "incubators", "temp_mode",  "TEXT DEFAULT 'incubation'")
+        _safe_add_column(conn, "incubators", "is_hidden",           "INTEGER DEFAULT 0")
+        _safe_add_column(conn, "incubators", "temp_mode",           "TEXT DEFAULT 'incubation'")
+        _safe_add_column(conn, "incubators", "temp_alerts_enabled", "INTEGER DEFAULT 1")
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -237,7 +239,7 @@ def get_incubators(include_hidden: bool = False) -> list:
 
 def upsert_incubator(data: dict) -> int:
     cols = ["name", "capacity", "govee_device_id", "govee_sku",
-            "temp_mode", "humidity_min", "humidity_max",
+            "temp_mode", "temp_alerts_enabled", "humidity_min", "humidity_max",
             "sort_order", "is_hidden"]
     with get_conn() as conn:
         if data.get("id"):
@@ -264,6 +266,13 @@ def set_incubator_temp_mode(incubator_id: int, mode: str):
     with get_conn() as conn:
         conn.execute("UPDATE incubators SET temp_mode=? WHERE id=?",
                      (mode, incubator_id))
+
+
+def set_incubator_alerts_enabled(incubator_id: int, enabled: bool):
+    """Enable or disable temperature alerts for one incubator."""
+    with get_conn() as conn:
+        conn.execute("UPDATE incubators SET temp_alerts_enabled=? WHERE id=?",
+                     (1 if enabled else 0, incubator_id))
 
 
 def delete_incubator(incubator_id: int):
@@ -428,6 +437,17 @@ def get_latest_reading(incubator_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+def get_readings_24h(incubator_id: int) -> list:
+    """Return all readings for one incubator in the past 24 hours, oldest first."""
+    cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute("""
+            SELECT * FROM temp_humidity_readings
+            WHERE incubator_id=? AND timestamp >= ?
+            ORDER BY timestamp ASC
+        """, (incubator_id, cutoff)).fetchall()]
+
+
 def get_recent_readings(incubator_id: int, limit: int = 48) -> list:
     with get_conn() as conn:
         return [dict(r) for r in conn.execute(
@@ -479,6 +499,19 @@ def acknowledge_alert(alert_id: int):
             "UPDATE alerts SET acknowledged=1, acknowledged_at=? WHERE id=?",
             (datetime.now().isoformat(), alert_id)
         )
+
+
+def get_alerts_24h() -> list:
+    """Return all alerts (any status) triggered in the past 24 hours."""
+    cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute("""
+            SELECT a.*, i.name AS incubator_name
+            FROM alerts a
+            LEFT JOIN incubators i ON a.incubator_id = i.id
+            WHERE a.triggered_at >= ?
+            ORDER BY a.triggered_at DESC
+        """, (cutoff,)).fetchall()]
 
 
 def acknowledge_all_alerts():

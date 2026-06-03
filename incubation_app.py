@@ -26,6 +26,7 @@ import voc_db
 from voc_panel import VOCPanel
 import inspection_db
 from inspection_form import InspectionDialog, InspectionsLogPanel, make_status_badges
+import email_reporter
 
 # Optional imports
 try:
@@ -729,6 +730,7 @@ class IncubationApp(ctk.CTk):
         self._start_govee()
         self._start_qr_server()
         self._start_alert_checker()
+        self._start_email_scheduler()
         self._git_pull()        # pull latest code from GitHub on startup
 
         # Refresh status bar periodically
@@ -922,6 +924,19 @@ class IncubationApp(ctk.CTk):
                      fg_color="#1E3A5F", text_color="#7DD3FC",
                      corner_radius=4, height=20,
                      padx=6).pack(side="left", padx=(8, 0))
+        # Alert toggle chip
+        alerts_on = bool(inc.get("temp_alerts_enabled", 1))
+        alert_chip_txt = "🔔 Alerts" if alerts_on else "🔕 Alerts Off"
+        alert_chip_bg  = "#1C3A1C" if alerts_on else "#3A1C1C"
+        alert_chip_fg  = GREEN if alerts_on else "#EF4444"
+        ctk.CTkButton(
+            hdr, text=alert_chip_txt,
+            font=("Segoe UI", 9, "bold"),
+            fg_color=alert_chip_bg, hover_color=CARD2,
+            text_color=alert_chip_fg,
+            corner_radius=4, height=20, width=90,
+            command=lambda i=inc: self._toggle_temp_alerts(i)
+        ).pack(side="left", padx=(6, 0))
 
         reading = self._govee.get_last(inc["id"])
         temp_c  = reading.get("temp_c")
@@ -1438,25 +1453,76 @@ class IncubationApp(ctk.CTk):
         _btn(act_row, "Use Local File (default)", self._use_local_db,
              fg=BORDER, hover=CARD2, width=180, height=30).pack(side="left")
 
+        # ── Email Reports ─────────────────────────────────────────────────
+        ef = ctk.CTkFrame(scroll, fg_color=CARD, corner_radius=10)
+        ef.pack(fill="x", padx=4, pady=(8, 2))
+        _label(ef, "Email Reports", FONT_H, GOLD).pack(
+            anchor="w", padx=14, pady=(10, 2))
+        _label(ef,
+               "A daily summary is sent at 7 PM with 24h temps, inspections, batch progress and "
+               "tomorrow's calendar.\nFor Gmail: use an App Password (Google Account › Security › "
+               "2-Step Verification › App passwords).",
+               FONT_S, SUBTEXT).pack(anchor="w", padx=14, pady=(0, 8))
+
+        eg = ctk.CTkFrame(ef, fg_color=CARD2, corner_radius=8)
+        eg.pack(fill="x", padx=14, pady=(0, 14))
+        eg.columnconfigure(1, weight=1)
+
+        self._set["smtp_host"]     = _FormRow(eg, 0, "SMTP Host",     "smtp.gmail.com", 220)
+        self._set["smtp_port"]     = _FormRow(eg, 1, "SMTP Port",     "587",            80)
+        self._set["smtp_tls"]      = _FormRow(eg, 2, "Use TLS (1/0)", "1",              60)
+        self._set["smtp_username"] = _FormRow(eg, 3, "Username / Email", "you@gmail.com", 260)
+        self._set["smtp_password"] = _FormRow(eg, 4, "Password / App Password", "••••••••", 260)
+        self._set["smtp_from"]     = _FormRow(eg, 5, "From Address (optional)", "Incubation App <you@gmail.com>", 300)
+
+        # Recipients box
+        _label(eg, "Recipients\n(one per line)", FONT_S, SUBTEXT).grid(
+            row=6, column=0, sticky="ne", padx=(14, 8), pady=8)
+        self._email_recip_box = ctk.CTkTextbox(
+            eg, height=90, fg_color=CARD, border_color=BORDER,
+            text_color=TEXT, font=FONT_S, corner_radius=6)
+        self._email_recip_box.grid(row=6, column=1, sticky="ew", padx=(0, 14), pady=8)
+
+        # Test + status
+        email_btn_row = ctk.CTkFrame(eg, fg_color="transparent")
+        email_btn_row.grid(row=7, column=1, sticky="w", padx=(0, 14), pady=(0, 10))
+        self._email_status_lbl = _label(email_btn_row, "", FONT_S, SUBTEXT)
+        _btn(email_btn_row, "Send Test Email", self._send_test_email,
+             fg=BLUE, hover="#1D4ED8", text_color="white",
+             width=150, height=30).pack(side="left", padx=(0, 10))
+        self._email_status_lbl.pack(side="left")
+
         return frame
 
     def _refresh_settings(self):
         keys = ["govee_api_key", "poll_interval_sec", "date_alert_lookahead",
                 "temp_unit", "lbs_per_gal", "target_gals_per_tray",
-                "qr_server_port", "qr_server_enabled"]
+                "qr_server_port", "qr_server_enabled",
+                "smtp_host", "smtp_port", "smtp_tls",
+                "smtp_username", "smtp_password", "smtp_from"]
         for k in keys:
             if k in self._set:
                 self._set[k].set(db.get_setting(k))
         self._qr_ip_lbl.configure(
             text=f"Phone scan URL: http://{qr_server.get_local_ip()}:{self._qr_port}/tray/<id>")
+        # Recipients text box
+        recip_val = db.get_setting("email_recipients", "")
+        self._email_recip_box.delete("1.0", "end")
+        if recip_val:
+            self._email_recip_box.insert("1.0", recip_val)
 
     def _save_settings(self):
         keys = ["govee_api_key", "poll_interval_sec", "date_alert_lookahead",
                 "temp_unit", "lbs_per_gal", "target_gals_per_tray",
-                "qr_server_port", "qr_server_enabled"]
+                "qr_server_port", "qr_server_enabled",
+                "smtp_host", "smtp_port", "smtp_tls",
+                "smtp_username", "smtp_password", "smtp_from"]
         for k in keys:
             if k in self._set:
                 db.set_setting(k, self._set[k].get())
+        # Save recipients
+        recip_text = self._email_recip_box.get("1.0", "end").strip()
+        db.set_setting("email_recipients", recip_text)
         # Update govee key live
         self._govee.set_api_key(db.get_setting("govee_api_key"))
         messagebox.showinfo("Settings", "Settings saved.", parent=self)
@@ -1708,6 +1774,27 @@ class IncubationApp(ctk.CTk):
         ).pack(side="left")
         _det_range_lbl.pack(side="left", padx=(12, 0))
 
+        # Alert on/off toggle
+        _alerts_on = bool(inc.get("temp_alerts_enabled", 1))
+        _alert_btn_txt = ctk.StringVar(value="🔔  Alerts On" if _alerts_on else "🔕  Alerts Off")
+
+        def _toggle_alert_detail(iid=inc["id"], sv=_alert_btn_txt):
+            cur_val = db.get_incubators()  # re-fetch to get live flag
+            cur_inc = next((x for x in cur_val if x["id"] == iid), {})
+            new_val = not bool(cur_inc.get("temp_alerts_enabled", 1))
+            db.set_incubator_alerts_enabled(iid, new_val)
+            sv.set("🔔  Alerts On" if new_val else "🔕  Alerts Off")
+            self._refresh_current()
+
+        ctk.CTkButton(
+            mrow, textvariable=_alert_btn_txt,
+            font=("Segoe UI", 11),
+            fg_color=BORDER, hover_color=CARD2,
+            text_color=TEXT,
+            width=130, height=28,
+            command=_toggle_alert_detail
+        ).pack(side="left", padx=(16, 0))
+
         tabs = ctk.CTkTabview(win, fg_color=CARD)
         tabs.pack(fill="both", expand=True, padx=12, pady=8)
 
@@ -1774,6 +1861,11 @@ class IncubationApp(ctk.CTk):
 
     def _set_hidden(self, iid: int, hidden: bool):
         db.set_incubator_hidden(iid, hidden)
+        self._refresh_current()
+
+    def _toggle_temp_alerts(self, inc: dict):
+        new_val = not bool(inc.get("temp_alerts_enabled", 1))
+        db.set_incubator_alerts_enabled(inc["id"], new_val)
         self._refresh_current()
 
     def _open_alerts(self):
@@ -1978,7 +2070,7 @@ class IncubationApp(ctk.CTk):
 
         incubators = db.get_incubators()
         inc = next((i for i in incubators if i["id"] == incubator_id), None)
-        if inc:
+        if inc and inc.get("temp_alerts_enabled", 1):
             problems = calc.check_temp_humidity(inc, temp_c, humidity)
             for msg in problems:
                 db.add_alert("temp_humidity", msg, severity="warning",
@@ -2038,6 +2130,63 @@ class IncubationApp(ctk.CTk):
                         batch_id=ev.get("batch_id"),
                     )
         self.after(0, self._refresh_alert_badge)
+
+    # ── Email scheduler ────────────────────────────────────────────────────────
+
+    def _start_email_scheduler(self):
+        """Background thread: send daily report at 7 PM if SMTP is configured."""
+        def _loop():
+            last_sent_date = None
+            while True:
+                try:
+                    now = datetime.now()
+                    if now.hour == 19 and now.minute < 5:        # 7:00–7:04 PM window
+                        today = now.date()
+                        if last_sent_date != today:
+                            if email_reporter.smtp_configured() and email_reporter.get_recipients():
+                                err = email_reporter.send_daily_report()
+                                if err:
+                                    print(f"[Email] Send failed: {err}")
+                                else:
+                                    print(f"[Email] Daily report sent ({today})")
+                            last_sent_date = today
+                except Exception as exc:
+                    print(f"[EmailScheduler] {exc}")
+                time.sleep(60)
+
+        t = threading.Thread(target=_loop, daemon=True, name="EmailScheduler")
+        t.start()
+
+    def _send_test_email(self):
+        """Send a test email immediately using current settings (must Save first)."""
+        recipients = email_reporter.get_recipients()
+        if not recipients:
+            self._email_status_lbl.configure(
+                text="No recipients — add at least one email and Save Settings.",
+                text_color=ORANGE)
+            return
+        if not email_reporter.smtp_configured():
+            self._email_status_lbl.configure(
+                text="SMTP host and username are required — Save Settings first.",
+                text_color=ORANGE)
+            return
+
+        self._email_status_lbl.configure(text="Sending…", text_color=SUBTEXT)
+        self.update_idletasks()
+
+        def _send():
+            err = email_reporter.send_daily_report()
+            def _done():
+                if err:
+                    self._email_status_lbl.configure(
+                        text=f"Failed: {err}", text_color=RED)
+                else:
+                    self._email_status_lbl.configure(
+                        text=f"Sent to {len(recipients)} recipient(s) ✓",
+                        text_color=GREEN)
+            self.after(0, _done)
+
+        threading.Thread(target=_send, daemon=True).start()
 
     # ── Git sync ──────────────────────────────────────────────────────────────
 

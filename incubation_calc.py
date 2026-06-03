@@ -129,6 +129,17 @@ def get_upcoming_events(batch: dict, lookahead_days: int = 30) -> list:
     return sorted(events, key=lambda x: x["days_away"])
 
 
+def get_incubation_day(batch: dict) -> int | None:
+    """
+    Return how many days into incubation this batch is (Day 1 = start date).
+    Returns None if start_date is not set.
+    """
+    start = parse_date(batch.get("start_date"))
+    if start is None:
+        return None
+    return (datetime.now().date() - start.date()).days + 1
+
+
 def get_all_events(batches: list, lookahead_days: int = 30) -> list:
     events = []
     for batch in batches:
