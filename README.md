@@ -41,29 +41,50 @@ python incubation_app.py
 ## Syncing data via Google Drive
 
 The app database (`incubation.db`) is **not** stored in git — it syncs through
-Google Drive so both computers share the same live data.
+Google Drive so every computer shares the same live data.
 
-### On your first (main) computer
+**Shared folder:** `My Drive\TNT Pollination\Incubation App`
+(the `incubation.db` file lives in there). On each computer this appears under
+that account's Google Drive — e.g. `G:\My Drive\TNT Pollination\Incubation App`
+or `C:\Users\<you>\My Drive\TNT Pollination\Incubation App`. Either path works
+in the Browse dialog; the drive letter just depends on how Drive is mounted.
+
+> ⚠️ **One person at a time.** This is a single SQLite file synced by Google
+> Drive, not a multi-user server. It's safe for several people to *use* the app,
+> but **two people editing at the same time can create Drive "conflict copies"
+> and lose data.** Coordinate so only one computer is making changes at once,
+> and let Drive finish syncing (tray icon idle) before someone else opens it.
+
+### Switching this computer to the shared folder
 
 1. Make sure **Google Drive for Desktop** is installed and signed in.
-2. Open the app and go to **Settings → Data Storage**.
-3. Click **Browse** and navigate to a folder inside your Google Drive  
-   (e.g. `Google Drive\BeeIncubation`).
-4. Click **Move & Restart**.  
-   The app copies your database into that folder and restarts using it.
+2. Open the app → **Settings → Data Storage**.
+3. Click **Browse** and navigate to `My Drive\TNT Pollination\Incubation App`.
+4. Click **Move & Restart**:
+   - If it warns the database **already exists** there, click **No** —
+     *"keep the existing (shared) database and just use it here."* This adopts
+     the shared data without overwriting it.
+   - Only click **Yes** (overwrite) if *this* computer holds the data you want
+     to become the shared copy.
+5. Close and reopen the app. **Settings → Data Storage** should now show the
+   `TNT Pollination\Incubation App` path.
 
-### On your second computer
+### Adding another user (a different Google account)
 
-1. Make sure **Google Drive for Desktop** is installed and signed in  
-   (same Google account — the `BeeIncubation` folder will sync down automatically).
-2. Clone the repo and install dependencies (steps 1–3 above).
-3. Launch the app once — it will start with an empty local database.
-4. Go to **Settings → Data Storage → Browse**, navigate to the same  
-   `Google Drive\BeeIncubation` folder, and click **Move & Restart**.  
-   The app will now use the shared database going forward.
+1. **Share the folder.** In Google Drive (web), right-click
+   `TNT Pollination` (or just the `Incubation App` subfolder) → **Share**, add
+   the other person's Gmail, and set them to **Editor**.
+2. **They add it to their Drive.** The other person opens Drive, finds the
+   shared folder under **Shared with me**, and chooses **Add shortcut to Drive**
+   (or **Make available offline** in Drive for Desktop) so it syncs to their PC.
+3. **They install the app** — follow *First-time setup* above.
+4. **They point the app at the shared folder** — *Settings → Data Storage →
+   Browse* to their local copy of `…\TNT Pollination\Incubation App`, click
+   **Move & Restart**, and choose **No** to join the existing data (per the
+   warning above).
 
-> **Tip:** Google Drive for Desktop shows as a mapped drive like `G:\` or appears
-> under `C:\Users\<you>\Google Drive`. Either path works in the Browse dialog.
+Remember the *one person at a time* rule — Google Drive sync is not a substitute
+for a real database server.
 
 ---
 

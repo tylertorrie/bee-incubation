@@ -1593,32 +1593,49 @@ class IncubationApp(ctk.CTk):
             return
 
         new_path = os.path.join(folder, "incubation.db")
+        same_file = (os.path.exists(new_path) and
+                     os.path.abspath(new_path) == os.path.abspath(db.DB_PATH))
 
-        if os.path.exists(new_path):
-            if not messagebox.askyesno(
-                    "File already exists",
-                    f"A database already exists at:\n{new_path}\n\n"
-                    "Overwrite it with your current data?",
-                    parent=self):
+        # If a database is already in the target folder (e.g. a shared Google
+        # Drive folder another computer set up), let the user JOIN it instead of
+        # overwriting — so a new computer never clobbers the shared data.
+        if os.path.exists(new_path) and not same_file:
+            choice = messagebox.askyesnocancel(
+                "Database already exists there",
+                f"A database already exists at:\n{new_path}\n\n"
+                "Yes — replace it with THIS computer's current data\n"
+                "No — keep the existing (shared) database and just use it here\n"
+                "Cancel — do nothing",
+                parent=self)
+            if choice is None:          # Cancel
                 return
-
-        # Copy current DB to new location
-        try:
-            shutil.copy2(db.DB_PATH, new_path)
-        except Exception as exc:
-            self._db_move_status.configure(
-                text=f"Copy failed: {exc}", text_color=RED)
-            return
+            if choice:                  # Yes — overwrite with our data
+                try:
+                    shutil.copy2(db.DB_PATH, new_path)
+                except Exception as exc:
+                    self._db_move_status.configure(
+                        text=f"Copy failed: {exc}", text_color=RED)
+                    return
+            # No — leave the existing file untouched and just adopt its path
+        elif not same_file:
+            # Empty target folder — copy our current data into it
+            try:
+                shutil.copy2(db.DB_PATH, new_path)
+            except Exception as exc:
+                self._db_move_status.configure(
+                    text=f"Copy failed: {exc}", text_color=RED)
+                return
 
         # Save new path to config so next launch uses it
         db.save_config({"db_path": new_path})
 
         messagebox.showinfo(
             "Done — please restart",
-            f"Database copied to:\n{new_path}\n\n"
-            "Close and reopen the app to start using the new location.\n\n"
-            "Tip: on your other computer, go to Settings and click\n"
-            "'Move & Restart', then browse to the same Google Drive folder.",
+            f"The app will now use:\n{new_path}\n\n"
+            "Close and reopen the app to start using this location.\n\n"
+            "Tip: on another computer, install the app, then go to\n"
+            "Settings ▸ Data Storage, browse to the same Google Drive folder,\n"
+            "click 'Move & Restart', and choose 'No' to join the shared data.",
             parent=self)
 
     def _use_local_db(self):
