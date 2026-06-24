@@ -2496,7 +2496,9 @@ class IncubationApp(ctk.CTk):
                 _tray_checks.clear()
                 for w in tscroll.winfo_children():
                     w.destroy()
-                trays = db.get_trays(incubator_id=fresh["id"])
+                # Only show trays currently in this incubator (active);
+                # released/removed trays drop off the list.
+                trays = db.get_trays(incubator_id=fresh["id"], status="active")
                 tray_count_lbl.configure(text=f"{len(trays)} tray(s)")
                 _update_delete_btn()
                 if trays:
@@ -2686,7 +2688,7 @@ class IncubationApp(ctk.CTk):
         tt = tabs.add("Trays")
         tr_scroll = ctk.CTkScrollableFrame(tt, fg_color="transparent")
         tr_scroll.pack(fill="both", expand=True)
-        for tray in db.get_trays(incubator_id=inc["id"]):
+        for tray in db.get_trays(incubator_id=inc["id"], status="active"):
             tr = ctk.CTkFrame(tr_scroll, fg_color=CARD2, corner_radius=6)
             tr.pack(fill="x", pady=2, padx=4)
             _label(tr, f"Tray {tray['tray_number']}", FONT_B, TEXT).pack(
