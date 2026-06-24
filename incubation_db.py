@@ -191,7 +191,7 @@ def init_db():
             ("target_gals_per_tray",    "2.0"),
             ("qr_server_port",          "5151"),
             ("qr_server_enabled",       "1"),
-            ("poll_interval_sec",       "60"),
+            ("poll_interval_sec",       "300"),
             ("temp_unit",               "C"),
             ("date_alert_lookahead",    "7"),
         ]

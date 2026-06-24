@@ -57,6 +57,52 @@ try:
 except ImportError:
     HAS_MPL = False
 
+# ── Version ─────────────────────────────────────────────────────────────────
+APP_VERSION = "1.5.0"   # bump on meaningful releases
+
+
+def _git_revision() -> str:
+    """Short git commit hash + date for the running code, or '' if unavailable."""
+    try:
+        import subprocess
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        out = subprocess.run(
+            ["git", "-C", app_dir, "log", "-1", "--format=%h · %cd", "--date=short"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def app_version_string() -> str:
+    rev = _git_revision()
+    return f"v{APP_VERSION}  ({rev})" if rev else f"v{APP_VERSION}"
+
+
+# ── Polling options (label → seconds) ───────────────────────────────────────
+POLL_INTERVAL_OPTIONS = [
+    ("5 minutes",  300),
+    ("10 minutes", 600),
+    ("15 minutes", 900),
+    ("20 minutes", 1200),
+    ("30 minutes", 1800),
+    ("45 minutes", 2700),
+    ("1 hour",     3600),
+]
+_POLL_LABEL_TO_SEC = {lbl: sec for lbl, sec in POLL_INTERVAL_OPTIONS}
+
+
+def _poll_seconds_to_label(seconds) -> str:
+    """Map a stored seconds value to the closest dropdown label."""
+    try:
+        sec = int(seconds)
+    except (TypeError, ValueError):
+        sec = 300
+    closest = min(POLL_INTERVAL_OPTIONS, key=lambda o: abs(o[1] - sec))
+    return closest[0]
+
+
 # ── Theme ─────────────────────────────────────────────────────────────────────
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -180,9 +226,10 @@ class _FormRow:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class IncubatorDialog(ctk.CTkToplevel):
-    def __init__(self, master, inc: dict = None, on_save=None):
+    def __init__(self, master, inc: dict = None, on_save=None, on_delete=None):
         super().__init__(master)
         self.on_save = on_save
+        self.on_delete = on_delete
         self.inc = inc or {}
         self.title("Edit Incubator" if inc else "Add Incubator")
         self.geometry("460x500")
@@ -231,6 +278,38 @@ class IncubatorDialog(ctk.CTkToplevel):
         _btn(btns, "Save", self._save, fg=DK_GOLD, hover=GOLD,
              text_color="black", width=130).pack(side="right", padx=4)
         _btn(btns, "Cancel", self.destroy, width=100).pack(side="right")
+
+        # Manage actions (only when editing an existing incubator)
+        if self.inc.get("id"):
+            is_hidden = bool(self.inc.get("is_hidden"))
+            _btn(btns, "Unhide" if is_hidden else "Hide",
+                 self._toggle_hidden, width=80,
+                 fg=CARD2, hover=BORDER, text_color=SUBTEXT).pack(side="left")
+            _btn(btns, "Delete", self._delete, width=80,
+                 fg="#4B0000", hover=RED, text_color="white").pack(side="left", padx=6)
+
+    def _toggle_hidden(self):
+        new_val = not bool(self.inc.get("is_hidden"))
+        db.set_incubator_hidden(self.inc["id"], new_val)
+        if self.on_save:
+            self.on_save()
+        self.destroy()
+
+    def _delete(self):
+        if not messagebox.askyesno(
+            "Delete Incubator",
+            f"Delete '{self.inc.get('name')}'?\n\n"
+            "This removes the incubator. Its trays and readings remain in the "
+            "database but will no longer be linked to an incubator.\n\n"
+            "This cannot be undone.",
+            icon="warning", parent=self):
+            return
+        db.delete_incubator(self.inc["id"])
+        if self.on_delete:
+            self.on_delete()
+        elif self.on_save:
+            self.on_save()
+        self.destroy()
 
     def _update_range_hint(self, *_):
         label = self._mode_var.get()
@@ -776,7 +855,6 @@ class IncubationApp(ctk.CTk):
         # Build all views (hidden until selected)
         self._views = {}
         self._views["dashboard"]    = self._build_dashboard()
-        self._views["incubators"]   = self._build_incubators_view()
         self._views["samples"]      = self._build_samples_view()
         self._views["trays"]        = self._build_trays_view()
         self._views["timeline"]     = self._build_timeline_view()
@@ -826,11 +904,12 @@ class IncubationApp(ctk.CTk):
         _label(sb, "Incubation", ("Segoe UI", 13, "bold"), GOLD).pack(
             pady=(0, 2), padx=16, anchor="center")
         _label(sb, "Bee Manager", FONT_S, SUBTEXT).pack(
+            pady=(0, 2), padx=16, anchor="center")
+        _label(sb, app_version_string(), ("Segoe UI", 9), "#6B7280").pack(
             pady=(0, 14), padx=16, anchor="center")
 
         nav_items = [
             ("🏠  Dashboard",     "dashboard"),
-            ("🏭  Incubators",    "incubators"),
             ("🧪  Samples",       "samples"),
             ("📦  Trays",         "trays"),
             ("📅  Timeline",      "timeline"),
@@ -1630,7 +1709,9 @@ class IncubationApp(ctk.CTk):
 
         # Poll interval
         pf = section("Polling & Thresholds")
-        self._set["poll_interval_sec"] = _FormRow(pf, 0, "Poll Interval (sec)", "60", 100)
+        self._set["poll_interval_sec"] = _FormRow(
+            pf, 0, "Govee Poll Interval",
+            widget=_combo(pf, [lbl for lbl, _ in POLL_INTERVAL_OPTIONS], 130))
         self._set["date_alert_lookahead"] = _FormRow(pf, 1, "Date Alert Lookahead (days)", "7", 100)
         self._set["temp_unit"] = _FormRow(pf, 2, "Temp Unit",
             widget=_combo(pf, ["C", "F"], 80))
@@ -1733,7 +1814,7 @@ class IncubationApp(ctk.CTk):
         return frame
 
     def _refresh_settings(self):
-        keys = ["govee_api_key", "poll_interval_sec", "date_alert_lookahead",
+        keys = ["govee_api_key", "date_alert_lookahead",
                 "temp_unit", "lbs_per_gal", "target_gals_per_tray",
                 "qr_server_port", "qr_server_enabled",
                 "smtp_host", "smtp_port", "smtp_tls",
@@ -1741,6 +1822,10 @@ class IncubationApp(ctk.CTk):
         for k in keys:
             if k in self._set:
                 self._set[k].set(db.get_setting(k))
+        # Poll interval is shown as a friendly label, stored as seconds
+        if "poll_interval_sec" in self._set:
+            self._set["poll_interval_sec"].set(
+                _poll_seconds_to_label(db.get_setting("poll_interval_sec", "300")))
         self._qr_ip_lbl.configure(
             text=f"Phone scan URL: http://{qr_server.get_local_ip()}:{self._qr_port}/tray/<id>")
         # Recipients text box
@@ -1750,7 +1835,7 @@ class IncubationApp(ctk.CTk):
             self._email_recip_box.insert("1.0", recip_val)
 
     def _save_settings(self):
-        keys = ["govee_api_key", "poll_interval_sec", "date_alert_lookahead",
+        keys = ["govee_api_key", "date_alert_lookahead",
                 "temp_unit", "lbs_per_gal", "target_gals_per_tray",
                 "qr_server_port", "qr_server_enabled",
                 "smtp_host", "smtp_port", "smtp_tls",
@@ -1758,12 +1843,21 @@ class IncubationApp(ctk.CTk):
         for k in keys:
             if k in self._set:
                 db.set_setting(k, self._set[k].get())
+        # Poll interval: convert friendly label back to seconds
+        if "poll_interval_sec" in self._set:
+            label = self._set["poll_interval_sec"].get()
+            db.set_setting("poll_interval_sec",
+                           str(_POLL_LABEL_TO_SEC.get(label, 300)))
         # Save recipients
         recip_text = self._email_recip_box.get("1.0", "end").strip()
         db.set_setting("email_recipients", recip_text)
         # Update govee key live
         self._govee.set_api_key(db.get_setting("govee_api_key"))
-        messagebox.showinfo("Settings", "Settings saved.", parent=self)
+        messagebox.showinfo("Settings",
+            "Settings saved.\n\n"
+            "Note: a changed Govee poll interval takes effect after the "
+            "background poller restarts (or the app is restarted).",
+            parent=self)
 
     # ── Data storage helpers ──────────────────────────────────────────────────
 
@@ -2166,7 +2260,15 @@ class IncubationApp(ctk.CTk):
 
         _btn(topbar, "Inspect Now", lambda i=fresh: self._open_inspection_form(i),
              width=110, height=32, fg=BLUE, hover="#1D4ED8",
-             text_color="white").pack(side="right", padx=12, pady=8)
+             text_color="white").pack(side="right", padx=(0, 12), pady=8)
+
+        _btn(topbar, "⚙ Edit Setup",
+             lambda i=fresh: IncubatorDialog(
+                 self, i,
+                 on_save=lambda: self._refresh_current(),
+                 on_delete=lambda: self.show_view("dashboard")),
+             width=110, height=32, fg=CARD2, hover=BORDER,
+             text_color=TEXT).pack(side="right", padx=4, pady=8)
 
         # ── Control row ───────────────────────────────────────────────────────
         ctrl = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=0)
@@ -3387,19 +3489,32 @@ class IncubationApp(ctk.CTk):
                 )
                 if result.returncode == 0:
                     msg = result.stdout.strip() or "Already up to date."
-                    print(f"[git pull] {msg}")
+                    self._sync_log(f"[git pull] {msg}")
                     self.after(0, lambda: self._set_git_status(msg, ok=True))
                 else:
                     err = (result.stderr or result.stdout).strip()
-                    print(f"[git pull] {err}")
+                    self._sync_log(f"[git pull] {err}")
                     self.after(0, lambda: self._set_git_status(f"pull: {err}", ok=False))
             except FileNotFoundError:
                 # git not on PATH — silent, not a required dependency
                 pass
             except Exception as exc:
-                print(f"[git pull] {exc}")
+                self._sync_log(f"[git pull] {exc}")
 
         threading.Thread(target=_pull, daemon=True, name="GitPull").start()
+
+    def _sync_log(self, msg: str):
+        """Print and append a git-sync message to git_sync.log next to the app."""
+        print(msg)
+        try:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "git_sync.log")
+            if os.path.exists(path) and os.path.getsize(path) > 250_000:
+                open(path, "w").close()   # simple rotation
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  {msg}\n")
+        except Exception:
+            pass
 
     def _start_auto_sync(self):
         """Keep code in sync with GitHub automatically (every 5 min):
@@ -3408,7 +3523,7 @@ class IncubationApp(ctk.CTk):
         Disable by setting 'auto_git_sync' to '0' in settings.
         """
         if db.get_setting("auto_git_sync", "1") != "1":
-            print("[AutoSync] disabled via settings")
+            self._sync_log("[AutoSync] disabled via settings")
             return
 
         def _loop():
@@ -3420,7 +3535,7 @@ class IncubationApp(ctk.CTk):
                 except FileNotFoundError:
                     pass   # git not installed — nothing we can do
                 except Exception as exc:
-                    print(f"[AutoSync] {exc}")
+                    self._sync_log(f"[AutoSync] {exc}")
                 time.sleep(300)   # 5 minutes
 
         threading.Thread(target=_loop, daemon=True, name="AutoSync").start()
@@ -3434,18 +3549,22 @@ class IncubationApp(ctk.CTk):
             return subprocess.run(["git", "-C", app_dir, *args],
                                   capture_output=True, text=True, timeout=timeout)
 
+        self._sync_log("[AutoSync] checking for updates…")
+        _did_something = False
+
         # 1. Pull remote changes (fast-forward only — never auto-merge)
         pull = _git("pull", "--ff-only")
         if pull.returncode != 0:
             err = (pull.stderr or pull.stdout).strip()
             self.after(0, lambda e=err: self._set_git_status(
                 f"sync paused: {e[:50]}", ok=False))
-            print(f"[AutoSync] pull failed (diverged?): {err}")
+            self._sync_log(f"[AutoSync] pull failed (diverged?): {err}")
             return
         pulled = (pull.stdout or "").strip()
         if pulled and "already up to date" not in pulled.lower():
             self.after(0, lambda m=pulled: self._set_git_status(f"Updated: {m}", ok=True))
-            print(f"[AutoSync] pulled: {pulled}")
+            self._sync_log(f"[AutoSync] pulled: {pulled}")
+            _did_something = True
 
         # 2. Commit local source edits (if any, stable, and valid)
         status = _git("status", "--porcelain").stdout.strip()
@@ -3453,7 +3572,7 @@ class IncubationApp(ctk.CTk):
             # Stability guard: don't commit mid-save. Re-check after a short pause.
             time.sleep(3)
             if _git("status", "--porcelain").stdout.strip() != status:
-                print("[AutoSync] files still changing — will retry next cycle")
+                self._sync_log("[AutoSync] files still changing — will retry next cycle")
                 return
             # Safety guard: never propagate code that doesn't compile.
             changed_py = [ln[3:].strip().strip('"') for ln in status.splitlines()
@@ -3465,17 +3584,17 @@ class IncubationApp(ctk.CTk):
                 if chk.returncode != 0:
                     self.after(0, lambda f=rel: self._set_git_status(
                         f"sync paused: {os.path.basename(f)} has errors", ok=False))
-                    print(f"[AutoSync] {rel} failed py_compile — not committing")
+                    self._sync_log(f"[AutoSync] {rel} failed py_compile — not committing")
                     return
             _git("add", "-A")
             host  = socket.gethostname()
             stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
             commit = _git("commit", "-m", f"Auto-sync from {host} at {stamp}")
             if commit.returncode == 0:
-                print(f"[AutoSync] committed local changes ({len(status.splitlines())} file(s))")
+                self._sync_log(f"[AutoSync] committed local changes ({len(status.splitlines())} file(s))")
             else:
                 err = (commit.stderr or commit.stdout).strip()
-                print(f"[AutoSync] commit failed: {err}")
+                self._sync_log(f"[AutoSync] commit failed: {err}")
                 return
 
         # 3. Push if we have commits ahead of origin
@@ -3485,12 +3604,17 @@ class IncubationApp(ctk.CTk):
             if push.returncode == 0:
                 self.after(0, lambda n=ahead: self._set_git_status(
                     f"Pushed {n} update(s) ✓", ok=True))
-                print(f"[AutoSync] pushed {ahead} commit(s)")
+                self._sync_log(f"[AutoSync] pushed {ahead} commit(s)")
+                _did_something = True
             else:
                 err = (push.stderr or push.stdout).strip()
                 self.after(0, lambda e=err: self._set_git_status(
                     f"push failed: {e[:50]}", ok=False))
-                print(f"[AutoSync] push failed: {err}")
+                self._sync_log(f"[AutoSync] push failed: {err}")
+                return
+
+        if not _did_something:
+            self._sync_log("[AutoSync] up to date — nothing to pull or push")
 
     def _set_git_status(self, msg: str, ok: bool):
         """Flash a brief git status message in the status bar."""
