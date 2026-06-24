@@ -80,27 +80,8 @@ def app_version_string() -> str:
     return f"v{APP_VERSION}  ({rev})" if rev else f"v{APP_VERSION}"
 
 
-# ── Polling options (label → seconds) ───────────────────────────────────────
-POLL_INTERVAL_OPTIONS = [
-    ("5 minutes",  300),
-    ("10 minutes", 600),
-    ("15 minutes", 900),
-    ("20 minutes", 1200),
-    ("30 minutes", 1800),
-    ("45 minutes", 2700),
-    ("1 hour",     3600),
-]
-_POLL_LABEL_TO_SEC = {lbl: sec for lbl, sec in POLL_INTERVAL_OPTIONS}
-
-
-def _poll_seconds_to_label(seconds) -> str:
-    """Map a stored seconds value to the closest dropdown label."""
-    try:
-        sec = int(seconds)
-    except (TypeError, ValueError):
-        sec = 300
-    closest = min(POLL_INTERVAL_OPTIONS, key=lambda o: abs(o[1] - sec))
-    return closest[0]
+# ── Polling ──────────────────────────────────────────────────────────────────
+POLL_INTERVAL_SEC = 15 * 60   # Govee polling is fixed at 15 minutes
 
 
 # ── Theme ─────────────────────────────────────────────────────────────────────
@@ -151,10 +132,15 @@ def _btn(parent, text, cmd, width=110, height=32, fg=CARD2, hover=BORDER,
                          text_color=text_color, corner_radius=6, **kw)
 
 
-def _poll_age(timestamp_iso: str | None) -> tuple[str, str]:
+def _poll_age(timestamp_iso: str | None, interval_sec: int = 300) -> tuple[str, str]:
     """
     Return (display_text, color) for how long ago a Govee poll timestamp was.
-    Green < 5 min, orange 5–30 min, red > 30 min or missing.
+
+    Freshness colors scale with the configured poll interval so they stay
+    meaningful at any rate (1 min → 1 hr):
+      green  = within ~1.5 cycles (healthy)
+      orange = within ~3 cycles   (a poll or two missed)
+      red    = beyond that, or missing
     """
     if not timestamp_iso:
         return "Never polled", SUBTEXT
@@ -171,7 +157,11 @@ def _poll_age(timestamp_iso: str | None) -> tuple[str, str]:
         text = "1 hr ago"
     else:
         text = f"{int(minutes // 60)} hrs ago"
-    color = GREEN if minutes < 5 else (ORANGE if minutes < 30 else RED)
+
+    cycle_min  = max(interval_sec / 60, 1)
+    green_cut  = cycle_min * 1.5 + 1     # one cycle + slack
+    orange_cut = cycle_min * 3   + 2
+    color = GREEN if minutes <= green_cut else (ORANGE if minutes <= orange_cut else RED)
     return text, color
 
 
@@ -836,10 +826,10 @@ class IncubationApp(ctk.CTk):
             except Exception:
                 pass
 
-        # Govee client
+        # Govee client (polling fixed at 15 minutes)
         self._govee = govee_mod.GoveeClient(
             api_key=db.get_setting("govee_api_key"),
-            poll_interval_sec=int(db.get_setting("poll_interval_sec", "60")),
+            poll_interval_sec=POLL_INTERVAL_SEC,
         )
         self._card_widgets: dict = {}  # incubator_id → {temp, hum, dot, ts} labels
         self._detail_inc: dict = {}   # incubator being shown in detail view
@@ -1171,7 +1161,7 @@ class IncubationApp(ctk.CTk):
         # Left: last poll time + next event
         left = ctk.CTkFrame(bottom, fg_color="transparent")
         left.grid(row=0, column=0, sticky="w")
-        _poll_txt, _poll_col = _poll_age(reading.get("timestamp"))
+        _poll_txt, _poll_col = _poll_age(reading.get("timestamp"), POLL_INTERVAL_SEC)
         lbl_ts = _label(left, f"Last polled: {_poll_txt}", FONT_S, _poll_col)
         lbl_ts.pack(anchor="w")
         self._card_widgets[inc["id"]] = {"temp": lbl_temp, "hum": lbl_hum,
@@ -1707,11 +1697,11 @@ class IncubationApp(ctk.CTk):
         self._poller_status_lbl.pack(anchor="w", padx=14, pady=(0, 8))
         self._refresh_poller_status()
 
-        # Poll interval
+        # Poll interval is fixed at 15 minutes (not user-configurable)
         pf = section("Polling & Thresholds")
-        self._set["poll_interval_sec"] = _FormRow(
-            pf, 0, "Govee Poll Interval",
-            widget=_combo(pf, [lbl for lbl, _ in POLL_INTERVAL_OPTIONS], 130))
+        _label(pf, "Govee poll interval: every 15 minutes (fixed)",
+               FONT_S, SUBTEXT).grid(row=0, column=0, columnspan=2,
+                                     sticky="w", padx=4, pady=4)
         self._set["date_alert_lookahead"] = _FormRow(pf, 1, "Date Alert Lookahead (days)", "7", 100)
         self._set["temp_unit"] = _FormRow(pf, 2, "Temp Unit",
             widget=_combo(pf, ["C", "F"], 80))
@@ -1822,10 +1812,6 @@ class IncubationApp(ctk.CTk):
         for k in keys:
             if k in self._set:
                 self._set[k].set(db.get_setting(k))
-        # Poll interval is shown as a friendly label, stored as seconds
-        if "poll_interval_sec" in self._set:
-            self._set["poll_interval_sec"].set(
-                _poll_seconds_to_label(db.get_setting("poll_interval_sec", "300")))
         self._qr_ip_lbl.configure(
             text=f"Phone scan URL: http://{qr_server.get_local_ip()}:{self._qr_port}/tray/<id>")
         # Recipients text box
@@ -1843,21 +1829,12 @@ class IncubationApp(ctk.CTk):
         for k in keys:
             if k in self._set:
                 db.set_setting(k, self._set[k].get())
-        # Poll interval: convert friendly label back to seconds
-        if "poll_interval_sec" in self._set:
-            label = self._set["poll_interval_sec"].get()
-            db.set_setting("poll_interval_sec",
-                           str(_POLL_LABEL_TO_SEC.get(label, 300)))
         # Save recipients
         recip_text = self._email_recip_box.get("1.0", "end").strip()
         db.set_setting("email_recipients", recip_text)
         # Update govee key live
         self._govee.set_api_key(db.get_setting("govee_api_key"))
-        messagebox.showinfo("Settings",
-            "Settings saved.\n\n"
-            "Note: a changed Govee poll interval takes effect after the "
-            "background poller restarts (or the app is restarted).",
-            parent=self)
+        messagebox.showinfo("Settings", "Settings saved.", parent=self)
 
     # ── Data storage helpers ──────────────────────────────────────────────────
 
@@ -3349,7 +3326,7 @@ class IncubationApp(ctk.CTk):
             hum    = reading.get("humidity")
             inc    = widgets.get("inc")
             t_min, t_max = calc.get_temp_range(inc)
-            _poll_txt, _poll_col = _poll_age(reading.get("timestamp"))
+            _poll_txt, _poll_col = _poll_age(reading.get("timestamp"), POLL_INTERVAL_SEC)
             if temp_c is not None:
                 t_str = calc.format_temp(temp_c, unit)
                 t_col = SUBTEXT if t_min is None else (GREEN if t_min <= temp_c <= t_max else RED)

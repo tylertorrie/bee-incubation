@@ -155,9 +155,9 @@ def main():
         _release_lock()
         sys.exit(1)
 
-    poll_sec = int(db.get_setting("poll_interval_sec", "60"))
+    poll_sec = 15 * 60   # Govee polling is fixed at 15 minutes
     client   = govee_mod.GoveeClient(api_key=api_key, poll_interval_sec=poll_sec)
-    log.info(f"Polling every {poll_sec}s")
+    log.info(f"Polling every {poll_sec}s (fixed 15 min)")
 
     # Debug: log raw DB contents once on startup
     try:
