@@ -2115,7 +2115,34 @@ class IncubationApp(ctk.CTk):
              width=90, height=32, fg="transparent", hover=CARD,
              text_color=SUBTEXT).pack(side="left", padx=8, pady=8)
 
-        _label(topbar, fresh["name"], FONT_H, GOLD).pack(side="left", padx=(4, 16))
+        # Incubator switcher: ‹ prev · name dropdown · next ›
+        _nav_list = db.get_incubators()  # visible incubators, in display order
+        _cur_idx  = next((i for i, x in enumerate(_nav_list)
+                          if x["id"] == fresh["id"]), 0)
+
+        def _go_to(idx: int):
+            if _nav_list:
+                self._show_inc_detail(_nav_list[idx % len(_nav_list)])
+
+        _btn(topbar, "‹", lambda: _go_to(_cur_idx - 1),
+             width=34, height=32, fg=CARD, hover=CARD2, text_color=GOLD).pack(
+             side="left", padx=(4, 2), pady=8)
+
+        _name_map = {x["name"]: i for i, x in enumerate(_nav_list)}
+        _name_var = ctk.StringVar(value=fresh["name"])
+        _name_dd  = ctk.CTkOptionMenu(
+            topbar, variable=_name_var, values=list(_name_map.keys()),
+            width=190, height=32, font=FONT_H,
+            fg_color=CARD, button_color=CARD2, button_hover_color=BORDER,
+            text_color=GOLD, dropdown_fg_color=CARD,
+            dropdown_text_color=TEXT, dropdown_hover_color=CARD2,
+            command=lambda name: _go_to(_name_map.get(name, _cur_idx)),
+        )
+        _name_dd.pack(side="left", padx=2, pady=8)
+
+        _btn(topbar, "›", lambda: _go_to(_cur_idx + 1),
+             width=34, height=32, fg=CARD, hover=CARD2, text_color=GOLD).pack(
+             side="left", padx=(2, 16), pady=8)
 
         reading = self._govee.get_last(fresh["id"])
         if not reading:
@@ -3161,12 +3188,20 @@ class IncubationApp(ctk.CTk):
 
     def _refresh_alert_badge(self):
         n = len(db.get_active_alerts())
-        col  = RED if n else SUBTEXT
-        self._alert_btn.configure(
-            text=f"🔔  Alerts  {n}",
-            text_color=col,
-            fg_color=(RED if n else CARD),
-        )
+        if n:
+            self._alert_btn.configure(
+                text=f"🔔  Alerts  ·  {n}",
+                text_color="#FFFFFF",
+                fg_color="#7F1D1D",      # deep red — clear but not garish
+                hover_color="#991B1B",
+            )
+        else:
+            self._alert_btn.configure(
+                text="🔔  No alerts",
+                text_color=SUBTEXT,
+                fg_color=CARD,
+                hover_color=CARD2,
+            )
 
     # ══════════════════════════════════════════════════════════════════════════
     #  BACKGROUND SERVICES
@@ -3189,8 +3224,12 @@ class IncubationApp(ctk.CTk):
         if inc and inc.get("temp_alerts_enabled", 1):
             problems = calc.check_temp_humidity(inc, temp_c, humidity)
             for msg in problems:
+                # One standing alert per incubator+problem-type; suppress the
+                # per-minute repeats while the condition persists.
+                kind = "humidity" if "humid" in msg.lower() else "temp"
                 db.add_alert("temp_humidity", msg, severity="warning",
-                             incubator_id=incubator_id)
+                             incubator_id=incubator_id,
+                             dedup_key=f"temp_humidity:{kind}:{incubator_id}")
 
         # Refresh UI on main thread
         self.after(0, self._on_reading_ui_refresh)
@@ -3363,30 +3402,95 @@ class IncubationApp(ctk.CTk):
         threading.Thread(target=_pull, daemon=True, name="GitPull").start()
 
     def _start_auto_sync(self):
-        """Pull from GitHub every 10 minutes — picks up pushes from the other computer."""
+        """Keep code in sync with GitHub automatically (every 5 min):
+        pull new commits, then commit + push any local edits.
+
+        Disable by setting 'auto_git_sync' to '0' in settings.
+        """
+        if db.get_setting("auto_git_sync", "1") != "1":
+            print("[AutoSync] disabled via settings")
+            return
+
         def _loop():
+            # Small initial delay so startup isn't competing with the launch pull
+            time.sleep(60)
             while True:
-                time.sleep(600)   # 10 minutes
                 try:
-                    import subprocess
-                    app_dir = os.path.dirname(os.path.abspath(__file__))
-                    result  = subprocess.run(
-                        ["git", "-C", app_dir, "pull", "--ff-only"],
-                        capture_output=True, text=True, timeout=20,
-                    )
-                    if result.returncode == 0:
-                        msg = (result.stdout.strip() or "").lower()
-                        if msg and "already up to date" not in msg:
-                            # New commits were pulled — notify in status bar
-                            self.after(0, lambda m=result.stdout.strip():
-                                self._set_git_status(f"Updated: {m}", ok=True))
-                            print(f"[AutoSync] {result.stdout.strip()}")
+                    self._auto_sync_once()
                 except FileNotFoundError:
-                    pass   # git not on PATH
+                    pass   # git not installed — nothing we can do
                 except Exception as exc:
                     print(f"[AutoSync] {exc}")
+                time.sleep(300)   # 5 minutes
 
         threading.Thread(target=_loop, daemon=True, name="AutoSync").start()
+
+    def _auto_sync_once(self):
+        """One full sync pass: pull → (commit local edits) → push. Thread-safe."""
+        import subprocess, socket
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+
+        def _git(*args, timeout=40):
+            return subprocess.run(["git", "-C", app_dir, *args],
+                                  capture_output=True, text=True, timeout=timeout)
+
+        # 1. Pull remote changes (fast-forward only — never auto-merge)
+        pull = _git("pull", "--ff-only")
+        if pull.returncode != 0:
+            err = (pull.stderr or pull.stdout).strip()
+            self.after(0, lambda e=err: self._set_git_status(
+                f"sync paused: {e[:50]}", ok=False))
+            print(f"[AutoSync] pull failed (diverged?): {err}")
+            return
+        pulled = (pull.stdout or "").strip()
+        if pulled and "already up to date" not in pulled.lower():
+            self.after(0, lambda m=pulled: self._set_git_status(f"Updated: {m}", ok=True))
+            print(f"[AutoSync] pulled: {pulled}")
+
+        # 2. Commit local source edits (if any, stable, and valid)
+        status = _git("status", "--porcelain").stdout.strip()
+        if status:
+            # Stability guard: don't commit mid-save. Re-check after a short pause.
+            time.sleep(3)
+            if _git("status", "--porcelain").stdout.strip() != status:
+                print("[AutoSync] files still changing — will retry next cycle")
+                return
+            # Safety guard: never propagate code that doesn't compile.
+            changed_py = [ln[3:].strip().strip('"') for ln in status.splitlines()
+                          if ln.strip().endswith(".py")]
+            for rel in changed_py:
+                chk = subprocess.run(
+                    [sys.executable, "-m", "py_compile", os.path.join(app_dir, rel)],
+                    capture_output=True, text=True)
+                if chk.returncode != 0:
+                    self.after(0, lambda f=rel: self._set_git_status(
+                        f"sync paused: {os.path.basename(f)} has errors", ok=False))
+                    print(f"[AutoSync] {rel} failed py_compile — not committing")
+                    return
+            _git("add", "-A")
+            host  = socket.gethostname()
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            commit = _git("commit", "-m", f"Auto-sync from {host} at {stamp}")
+            if commit.returncode == 0:
+                print(f"[AutoSync] committed local changes ({len(status.splitlines())} file(s))")
+            else:
+                err = (commit.stderr or commit.stdout).strip()
+                print(f"[AutoSync] commit failed: {err}")
+                return
+
+        # 3. Push if we have commits ahead of origin
+        ahead = _git("rev-list", "--count", "origin/main..HEAD").stdout.strip()
+        if ahead and ahead != "0":
+            push = _git("push", "origin", "main")
+            if push.returncode == 0:
+                self.after(0, lambda n=ahead: self._set_git_status(
+                    f"Pushed {n} update(s) ✓", ok=True))
+                print(f"[AutoSync] pushed {ahead} commit(s)")
+            else:
+                err = (push.stderr or push.stdout).strip()
+                self.after(0, lambda e=err: self._set_git_status(
+                    f"push failed: {e[:50]}", ok=False))
+                print(f"[AutoSync] push failed: {err}")
 
     def _set_git_status(self, msg: str, ok: bool):
         """Flash a brief git status message in the status bar."""

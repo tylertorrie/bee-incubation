@@ -208,6 +208,8 @@ def init_db():
         # Marks readings that have been collapsed into 12-hour averages
         _safe_add_column(conn, "temp_humidity_readings", "is_downsampled", "INTEGER DEFAULT 0")
         conn.execute("UPDATE temp_humidity_readings SET is_downsampled=0 WHERE is_downsampled IS NULL")
+        # Key used to suppress repeated/duplicate alerts
+        _safe_add_column(conn, "alerts", "dedup_key", "TEXT")
 
         # Backfill NULLs left by the migration (rows that existed before the column was added)
         conn.execute("UPDATE incubators SET is_hidden=0           WHERE is_hidden IS NULL")
@@ -710,15 +712,50 @@ def downsample_old_readings(days: int = 120) -> dict:
 # ── Alerts ────────────────────────────────────────────────────────────────────
 
 def add_alert(alert_type: str, message: str, severity: str = "warning",
-              incubator_id: int = None, tray_id: int = None, batch_id: int = None):
+              incubator_id: int = None, tray_id: int = None, batch_id: int = None,
+              cooldown_min: int = 60, dedup_key: str = None) -> bool:
+    """Insert an alert, suppressing repeats so a persistent problem doesn't spam.
+
+    A new alert is skipped when a matching one is either still unacknowledged, or
+    was triggered within the last `cooldown_min` minutes. "Matching" is decided by
+    `dedup_key` when supplied (e.g. "temp_humidity:3"), otherwise by the tuple
+    (alert_type, incubator_id, batch_id, tray_id, message).
+
+    Returns True if an alert was inserted, False if it was suppressed.
+    """
+    now    = datetime.now()
+    cutoff = (now - timedelta(minutes=cooldown_min)).isoformat()
     with get_conn() as conn:
+        if dedup_key is not None:
+            existing = conn.execute(
+                """SELECT id FROM alerts
+                   WHERE dedup_key=? AND (acknowledged=0 OR triggered_at >= ?)
+                   LIMIT 1""",
+                (dedup_key, cutoff)
+            ).fetchone()
+        else:
+            existing = conn.execute(
+                """SELECT id FROM alerts
+                   WHERE alert_type=?
+                     AND IFNULL(incubator_id,-1)=IFNULL(?,-1)
+                     AND IFNULL(batch_id,-1)=IFNULL(?,-1)
+                     AND IFNULL(tray_id,-1)=IFNULL(?,-1)
+                     AND message=?
+                     AND (acknowledged=0 OR triggered_at >= ?)
+                   LIMIT 1""",
+                (alert_type, incubator_id, batch_id, tray_id, message, cutoff)
+            ).fetchone()
+        if existing:
+            return False
         conn.execute(
             """INSERT INTO alerts
-               (alert_type, severity, incubator_id, tray_id, batch_id, message, triggered_at)
-               VALUES (?,?,?,?,?,?,?)""",
+               (alert_type, severity, incubator_id, tray_id, batch_id,
+                message, triggered_at, dedup_key)
+               VALUES (?,?,?,?,?,?,?,?)""",
             (alert_type, severity, incubator_id, tray_id, batch_id,
-             message, datetime.now().isoformat())
+             message, now.isoformat(), dedup_key)
         )
+        return True
 
 
 def get_active_alerts() -> list:
