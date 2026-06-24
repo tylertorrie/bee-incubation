@@ -150,6 +150,7 @@ def get_all_events(batches: list, lookahead_days: int = 30) -> list:
 # ── Temperature mode presets ──────────────────────────────────────────────────
 
 TEMP_MODES = {
+    "off":          {"label": "Off",            "min": None, "max": None},
     "cool_storage": {"label": "Cool Storage",  "min":  0.0, "max": 12.0},
     "incubation":   {"label": "Incubation",     "min": 25.0, "max": 35.0},
     "holding":      {"label": "Holding Temp",   "min": 10.0, "max": 18.0},
@@ -160,7 +161,7 @@ _MODE_BY_LABEL = {v["label"]: k for k, v in TEMP_MODES.items()}
 
 
 def get_temp_range(incubator: dict) -> tuple:
-    """Return (min_c, max_c) for the incubator's current temp_mode."""
+    """Return (min_c, max_c) for the incubator's current temp_mode, or (None, None) if Off."""
     mode = incubator.get("temp_mode") or "incubation"
     cfg  = TEMP_MODES.get(mode, TEMP_MODES["incubation"])
     return cfg["min"], cfg["max"]
@@ -179,18 +180,14 @@ def check_temp_humidity(incubator: dict,
     name = incubator.get("name", f"Incubator {incubator.get('id', '?')}")
 
     t_min, t_max = get_temp_range(incubator)
-    h_min = float(incubator.get("humidity_min") or 55.0)
-    h_max = float(incubator.get("humidity_max") or 75.0)
+
+    if t_min is None:  # Off mode — no alerts
+        return problems
 
     if temp_c < t_min:
         problems.append(f"{name}: Temp {temp_c:.1f}°C below minimum {t_min}°C")
     elif temp_c > t_max:
         problems.append(f"{name}: Temp {temp_c:.1f}°C above maximum {t_max}°C")
-
-    if humidity < h_min:
-        problems.append(f"{name}: Humidity {humidity:.0f}% below minimum {h_min:.0f}%")
-    elif humidity > h_max:
-        problems.append(f"{name}: Humidity {humidity:.0f}% above maximum {h_max:.0f}%")
 
     return problems
 

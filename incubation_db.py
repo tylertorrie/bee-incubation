@@ -205,6 +205,53 @@ def init_db():
         _safe_add_column(conn, "incubators", "is_hidden",           "INTEGER DEFAULT 0")
         _safe_add_column(conn, "incubators", "temp_mode",           "TEXT DEFAULT 'incubation'")
         _safe_add_column(conn, "incubators", "temp_alerts_enabled", "INTEGER DEFAULT 1")
+        # Marks readings that have been collapsed into 12-hour averages
+        _safe_add_column(conn, "temp_humidity_readings", "is_downsampled", "INTEGER DEFAULT 0")
+        conn.execute("UPDATE temp_humidity_readings SET is_downsampled=0 WHERE is_downsampled IS NULL")
+
+        # Backfill NULLs left by the migration (rows that existed before the column was added)
+        conn.execute("UPDATE incubators SET is_hidden=0           WHERE is_hidden IS NULL")
+        conn.execute("UPDATE incubators SET temp_mode='incubation' WHERE temp_mode IS NULL")
+        conn.execute("UPDATE incubators SET temp_alerts_enabled=1  WHERE temp_alerts_enabled IS NULL")
+
+        # ── Migration: drop UNIQUE constraint on trays.tray_number ──────────────
+        # Tray QR codes can be reused across seasons (same physical tray, different
+        # sample/incubator). We allow multiple rows per tray_number; the "current"
+        # record is the one with status='active'.  SQLite requires table recreation
+        # to remove a UNIQUE constraint.
+        _has_unique = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='index' AND tbl_name='trays' AND name='sqlite_autoindex_trays_1'"
+        ).fetchone()[0]
+        if _has_unique:
+            conn.executescript("""
+                ALTER TABLE trays RENAME TO _trays_old;
+
+                CREATE TABLE trays (
+                    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tray_number             TEXT    NOT NULL,
+                    sample_id               INTEGER REFERENCES samples(id)             ON DELETE SET NULL,
+                    incubation_batch_id     INTEGER REFERENCES incubation_batches(id)  ON DELETE SET NULL,
+                    incubator_id            INTEGER REFERENCES incubators(id)          ON DELETE SET NULL,
+                    weight_lbs              REAL,
+                    live_count              INTEGER,
+                    parasite_level_pct      REAL,
+                    volume_gal              REAL,
+                    in_date                 TEXT,
+                    out_date                TEXT,
+                    status                  TEXT    DEFAULT 'active',
+                    notes                   TEXT    DEFAULT ''
+                );
+
+                INSERT INTO trays SELECT * FROM _trays_old;
+                DROP TABLE _trays_old;
+            """)
+
+        # Performance indexes
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trays_incubator_status ON trays(incubator_id, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trays_status ON trays(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trays_number ON trays(tray_number)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_readings_incubator_ts ON temp_humidity_readings(incubator_id, timestamp)")
 
 
 def get_setting(key: str, default: str = "") -> str:
@@ -228,12 +275,14 @@ def get_incubators(include_hidden: bool = False) -> list:
     Hidden incubators are excluded by default; pass include_hidden=True
     to get the full list (used by the management view).
     """
+    _order = "sort_order, CAST(REPLACE(LOWER(name),'incubator ','') AS INTEGER), name"
     with get_conn() as conn:
         if include_hidden:
-            sql = "SELECT * FROM incubators ORDER BY is_hidden, name"
-            return [dict(r) for r in conn.execute(sql).fetchall()]
+            return [dict(r) for r in conn.execute(
+                f"SELECT * FROM incubators ORDER BY is_hidden, {_order}"
+            ).fetchall()]
         return [dict(r) for r in conn.execute(
-            "SELECT * FROM incubators WHERE is_hidden=0 ORDER BY name"
+            f"SELECT * FROM incubators WHERE is_hidden=0 ORDER BY {_order}"
         ).fetchall()]
 
 
@@ -393,16 +442,90 @@ def get_tray_by_id(tray_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+def get_tray_by_number(tray_number: str, active_only: bool = False) -> dict | None:
+    """Return the tray row for tray_number.
+    Prefers the active row; falls back to the most recently inserted historical row.
+    Pass active_only=True to return None when the tray has no active record."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT t.*, s.name AS sample_name, i.name AS incubator_name
+            FROM trays t
+            LEFT JOIN samples    s ON t.sample_id    = s.id
+            LEFT JOIN incubators i ON t.incubator_id = i.id
+            WHERE t.tray_number=?
+            ORDER BY CASE WHEN t.status='active' THEN 0 ELSE 1 END, t.id DESC
+        """, (tray_number,)).fetchall()
+        if not rows:
+            return None
+        if active_only and rows[0]["status"] != "active":
+            return None
+        return dict(rows[0])
+
+
+def get_tray_history(tray_number: str) -> list:
+    """Return all rows for a tray_number, newest first — for season history display."""
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute("""
+            SELECT t.*, s.name AS sample_name, i.name AS incubator_name
+            FROM trays t
+            LEFT JOIN samples    s ON t.sample_id    = s.id
+            LEFT JOIN incubators i ON t.incubator_id = i.id
+            WHERE t.tray_number=?
+            ORDER BY t.id DESC
+        """, (tray_number,)).fetchall()]
+
+
+def release_tray(tray_number: str, out_date: str = None, notes_append: str = "") -> bool:
+    """Mark the CURRENT (active) tray with this number as released (sent to field).
+
+    Only the active record is touched — historical released rows from previous
+    seasons are left untouched so the tray's history stays intact.
+    Returns True if an active record was found and updated, else False.
+    """
+    from datetime import date as _date
+    tray = get_tray_by_number(tray_number, active_only=True)
+    if not tray:
+        return False
+    new_notes = tray.get("notes") or ""
+    if notes_append:
+        new_notes = (new_notes + "\n" + notes_append).strip()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE trays SET status=?, out_date=?, notes=? WHERE id=?",
+            ("released", out_date or _date.today().isoformat(), new_notes, tray["id"]),
+        )
+    return True
+
+
 def upsert_tray(data: dict) -> int:
     cols = ["tray_number", "sample_id", "incubation_batch_id", "incubator_id",
             "weight_lbs", "live_count", "parasite_level_pct", "volume_gal",
             "in_date", "out_date", "status", "notes"]
     with get_conn() as conn:
+        # Explicit ID — always update that exact row
         if data.get("id"):
             sets = ", ".join(f"{c}=?" for c in cols)
             vals = [data.get(c) for c in cols] + [data["id"]]
             conn.execute(f"UPDATE trays SET {sets} WHERE id=?", vals)
             return int(data["id"])
+
+        tray_num = data.get("tray_number", "")
+        if tray_num:
+            # Check for an existing active row with this tray number.
+            # If found, update it in-place (same tray, same season).
+            # If only historical rows exist, fall through to INSERT (new season).
+            existing = conn.execute(
+                "SELECT id FROM trays WHERE tray_number=? AND status='active'",
+                (tray_num,)
+            ).fetchone()
+            if existing:
+                row_id = existing["id"]
+                sets = ", ".join(f"{c}=?" for c in cols)
+                vals = [data.get(c) for c in cols] + [row_id]
+                conn.execute(f"UPDATE trays SET {sets} WHERE id=?", vals)
+                return row_id
+
+        # No active row found — insert as a new record (new season reuse or brand-new tray)
         vals = [data.get(c) for c in cols]
         cur = conn.execute(
             f"INSERT INTO trays ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})",
@@ -413,6 +536,63 @@ def upsert_tray(data: dict) -> int:
 def delete_tray(tray_id: int):
     with get_conn() as conn:
         conn.execute("DELETE FROM trays WHERE id=?", (tray_id,))
+
+
+def set_trays_status(tray_ids: list, status: str, out_date: str = None,
+                     overwrite_out_date: bool = False) -> int:
+    """Set status on many trays at once. Returns the number of rows updated.
+
+    For 'released'/'removed' an out_date is stamped:
+      - pass out_date to use a specific date (defaults to today if None)
+      - overwrite_out_date=False only fills trays that have no out_date yet
+      - overwrite_out_date=True sets the date on every selected tray
+    """
+    if not tray_ids:
+        return 0
+    from datetime import date as _date
+    placeholders = ",".join("?" * len(tray_ids))
+    with get_conn() as conn:
+        if status in ("released", "removed"):
+            stamp = out_date or _date.today().isoformat()
+            if overwrite_out_date:
+                conn.execute(
+                    f"UPDATE trays SET status=?, out_date=? WHERE id IN ({placeholders})",
+                    [status, stamp, *tray_ids],
+                )
+            else:
+                conn.execute(
+                    f"UPDATE trays SET status=?, out_date=COALESCE(out_date, ?) "
+                    f"WHERE id IN ({placeholders})",
+                    [status, stamp, *tray_ids],
+                )
+        else:
+            conn.execute(
+                f"UPDATE trays SET status=? WHERE id IN ({placeholders})",
+                [status, *tray_ids],
+            )
+        return conn.total_changes
+
+
+def delete_all_trays() -> int:
+    """Delete every tray row. Returns the number of rows removed.
+    Destructive — callers must confirm with the user first."""
+    with get_conn() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM trays").fetchone()[0]
+        conn.execute("DELETE FROM trays")
+        return n
+
+
+def get_tray_stats(incubator_id: int = None, status: str = None) -> dict:
+    """Return {count, total_gals} using SQL aggregates — much faster than fetching all rows."""
+    q      = "SELECT COUNT(*) AS cnt, COALESCE(SUM(volume_gal), 0) AS gals FROM trays WHERE 1=1"
+    params = []
+    if incubator_id is not None:
+        q += " AND incubator_id=?"; params.append(incubator_id)
+    if status:
+        q += " AND status=?";       params.append(status)
+    with get_conn() as conn:
+        row = conn.execute(q, params).fetchone()
+        return {"count": row[0], "total_gals": row[1]}
 
 
 # ── Temp / Humidity ───────────────────────────────────────────────────────────
@@ -439,7 +619,12 @@ def get_latest_reading(incubator_id: int) -> dict | None:
 
 def get_readings_24h(incubator_id: int) -> list:
     """Return all readings for one incubator in the past 24 hours, oldest first."""
-    cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+    return get_readings_hours(incubator_id, 24)
+
+
+def get_readings_hours(incubator_id: int, hours: float) -> list:
+    """Return readings for one incubator over the past N hours, oldest first."""
+    cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
     with get_conn() as conn:
         return [dict(r) for r in conn.execute("""
             SELECT * FROM temp_humidity_readings
@@ -465,6 +650,61 @@ def prune_old_readings(days: int = 30):
             "DELETE FROM temp_humidity_readings WHERE timestamp < date(?, ?)",
             (cutoff, f"-{days} days")
         )
+
+
+def downsample_old_readings(days: int = 120) -> dict:
+    """
+    Collapse raw readings older than `days` days into 12-hour averages, kept forever.
+
+    Recent data (within `days`) stays at full minute-by-minute resolution so the
+    detail charts are unaffected.  Anything older is grouped per incubator into
+    two buckets per day (00:00 and 12:00), averaged, and the raw rows replaced by
+    a single averaged row per bucket — about a 700x reduction at a 60s poll rate.
+
+    Idempotent: averaged rows are flagged is_downsampled=1 and skipped on later
+    runs, so only newly-aged-out data is processed each time.
+
+    Returns {"collapsed": <raw rows removed>, "buckets": <averaged rows written>}.
+    """
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    with get_conn() as conn:
+        # How many raw rows are about to be collapsed (for reporting)
+        raw = conn.execute(
+            "SELECT COUNT(*) FROM temp_humidity_readings "
+            "WHERE is_downsampled=0 AND timestamp < ?",
+            (cutoff,)
+        ).fetchone()[0]
+        if not raw:
+            return {"collapsed": 0, "buckets": 0}
+
+        # 1. Insert one averaged row per incubator per 12-hour bucket.
+        #    Bucket start = that day's 00:00 (hour < 12) or 12:00 (hour >= 12).
+        cur = conn.execute("""
+            INSERT INTO temp_humidity_readings
+                  (incubator_id, timestamp, temperature_c, humidity_pct, is_downsampled)
+            SELECT incubator_id,
+                   strftime('%Y-%m-%dT', timestamp)
+                     || CASE WHEN CAST(strftime('%H', timestamp) AS INTEGER) < 12
+                             THEN '00:00:00' ELSE '12:00:00' END,
+                   AVG(temperature_c),
+                   AVG(humidity_pct),
+                   1
+            FROM temp_humidity_readings
+            WHERE is_downsampled=0 AND timestamp < ?
+            GROUP BY incubator_id,
+                     strftime('%Y-%m-%d', timestamp),
+                     CASE WHEN CAST(strftime('%H', timestamp) AS INTEGER) < 12
+                          THEN 0 ELSE 1 END
+        """, (cutoff,))
+        buckets = cur.rowcount
+
+        # 2. Delete the raw rows we just averaged (the new rows are is_downsampled=1)
+        conn.execute(
+            "DELETE FROM temp_humidity_readings "
+            "WHERE is_downsampled=0 AND timestamp < ?",
+            (cutoff,)
+        )
+        return {"collapsed": raw, "buckets": buckets}
 
 
 # ── Alerts ────────────────────────────────────────────────────────────────────

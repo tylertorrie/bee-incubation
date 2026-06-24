@@ -12,6 +12,9 @@ __pycache__/
 *.pyo
 *.pyd
 
+# Log files — local to each machine
+*.log
+
 # Desktop shortcut / icon artefacts
 # (logo.png is tracked — it's the source asset)
 *.ico

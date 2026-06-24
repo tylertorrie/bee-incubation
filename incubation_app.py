@@ -47,6 +47,16 @@ try:
 except ImportError:
     HAS_XLSX = False
 
+try:
+    import matplotlib
+    matplotlib.use("Agg")          # non-interactive backend — never spawns its own window
+    import matplotlib.dates as mdates
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    HAS_MPL = True
+except ImportError:
+    HAS_MPL = False
+
 # ── Theme ─────────────────────────────────────────────────────────────────────
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -93,6 +103,30 @@ def _btn(parent, text, cmd, width=110, height=32, fg=CARD2, hover=BORDER,
     return ctk.CTkButton(parent, text=text, command=cmd, width=width,
                          height=height, fg_color=fg, hover_color=hover,
                          text_color=text_color, corner_radius=6, **kw)
+
+
+def _poll_age(timestamp_iso: str | None) -> tuple[str, str]:
+    """
+    Return (display_text, color) for how long ago a Govee poll timestamp was.
+    Green < 5 min, orange 5–30 min, red > 30 min or missing.
+    """
+    if not timestamp_iso:
+        return "Never polled", SUBTEXT
+    try:
+        then    = datetime.fromisoformat(timestamp_iso)
+        minutes = (datetime.now() - then).total_seconds() / 60
+    except Exception:
+        return "Unknown", SUBTEXT
+    if minutes < 1:
+        text = "Just now"
+    elif minutes < 60:
+        text = f"{int(minutes)} min ago"
+    elif minutes < 120:
+        text = "1 hr ago"
+    else:
+        text = f"{int(minutes // 60)} hrs ago"
+    color = GREEN if minutes < 5 else (ORANGE if minutes < 30 else RED)
+    return text, color
 
 
 def _entry(parent, placeholder="", width=200):
@@ -169,8 +203,6 @@ class IncubatorDialog(ctk.CTkToplevel):
             ("Capacity (trays)",  "50",           "capacity"),
             ("Govee Device ID",   "AB:CD:EF:...", "govee_device_id"),
             ("Govee SKU / Model", "H5075",        "govee_sku"),
-            ("Humidity Min (%)",  "55",           "humidity_min"),
-            ("Humidity Max (%)",  "75",           "humidity_max"),
         ]
         self._rows = {}
         for i, (lbl, ph, key) in enumerate(rows):
@@ -204,7 +236,8 @@ class IncubatorDialog(ctk.CTkToplevel):
         label = self._mode_var.get()
         key   = calc._MODE_BY_LABEL.get(label, "incubation")
         cfg   = calc.TEMP_MODES[key]
-        self._range_hint.configure(text=f"Alert range: {cfg['min']}–{cfg['max']} °C")
+        hint  = "No temperature alerts" if cfg["min"] is None else f"Alert range: {cfg['min']}–{cfg['max']} °C"
+        self._range_hint.configure(text=hint)
 
     def _populate(self):
         for key, row in self._rows.items():
@@ -231,6 +264,10 @@ class IncubatorDialog(ctk.CTkToplevel):
         # Temp mode from segmented button
         label = self._mode_var.get()
         data["temp_mode"] = calc._MODE_BY_LABEL.get(label, "incubation")
+        # Preserve fields not editable in this form so they aren't overwritten with None
+        for preserve in ("sort_order", "is_hidden", "temp_alerts_enabled"):
+            if preserve not in data:
+                data[preserve] = self.inc.get(preserve)
         db.upsert_incubator(data)
         if self.on_save:
             self.on_save()
@@ -569,6 +606,10 @@ class TrayDialog(ctk.CTkToplevel):
         }
         for key in ("in_date", "out_date"):
             data[key] = self._mrows[key].get() or None
+        # Auto-release: if an out_date is set and status is still active, mark as released
+        if data.get("out_date") and data.get("status") == "active":
+            data["status"] = "released"
+            self._status.set("released")
         for key in ("weight_lbs", "volume_gal", "parasite_level_pct"):
             val = self._mrows[key].get()
             try:
@@ -721,6 +762,8 @@ class IncubationApp(ctk.CTk):
             api_key=db.get_setting("govee_api_key"),
             poll_interval_sec=int(db.get_setting("poll_interval_sec", "60")),
         )
+        self._card_widgets: dict = {}  # incubator_id → {temp, hum, dot, ts} labels
+        self._detail_inc: dict = {}   # incubator being shown in detail view
 
         # QR server port
         self._qr_port = int(db.get_setting("qr_server_port", "5151"))
@@ -739,6 +782,7 @@ class IncubationApp(ctk.CTk):
         self._views["timeline"]     = self._build_timeline_view()
         self._views["inspections"]  = self._build_inspections_view()
         self._views["settings"]     = self._build_settings_view()
+        self._views["inc_detail"]   = self._build_inc_detail_view()
 
         self._current_view = None
         self.show_view("dashboard")
@@ -836,9 +880,11 @@ class IncubationApp(ctk.CTk):
     def show_view(self, name: str):
         for v in self._views.values():
             v.pack_forget()
-        for k, btn in self._nav_btns.items():
-            btn.configure(fg_color=CARD if k == name else "transparent",
-                          text_color=GOLD if k == name else TEXT)
+        # inc_detail is not a top-level nav item — keep the previous nav btn highlighted
+        if name != "inc_detail":
+            for k, btn in self._nav_btns.items():
+                btn.configure(fg_color=CARD if k == name else "transparent",
+                              text_color=GOLD if k == name else TEXT)
         view = self._views[name]
         view.pack(fill="both", expand=True)
         self._current_view = name
@@ -880,6 +926,7 @@ class IncubationApp(ctk.CTk):
         self._refresh_dashboard()
 
     def _refresh_dashboard(self):
+        self._card_widgets.clear()
         container = self._dash_scroll
         for w in container.winfo_children():
             w.destroy()
@@ -911,152 +958,183 @@ class IncubationApp(ctk.CTk):
                        FONT_B, SUBTEXT).pack()
             return
 
-        # Summary row
-        all_trays  = db.get_trays(status="active")
-        total_gals = sum(t.get("volume_gal") or 0 for t in all_trays)
-        summary_f  = ctk.CTkFrame(container, fg_color=CARD, corner_radius=10)
+        # Summary row — use aggregate query, not full row fetch
+        _stats         = db.get_tray_stats(status="active")
+        tray_count     = _stats["count"]
+        total_gals     = _stats["total_gals"]
+        total_capacity = sum((i.get("capacity") or 0) for i in incubators)
+        fill_pct       = round(tray_count / total_capacity * 100) if total_capacity else 0
+        fill_col       = GREEN if fill_pct < 80 else (ORANGE if fill_pct < 95 else RED)
+
+        summary_f = ctk.CTkFrame(container, fg_color=CARD, corner_radius=10)
         summary_f.pack(fill="x", pady=(0, 12), padx=4)
-        for txt, val in [
-            ("Active Incubators", str(len(incubators))),
-            ("Total Trays",       str(len(all_trays))),
-            ("Total Gals",        f"{total_gals:.1f}"),
-            ("Active Alerts",     str(len(db.get_active_alerts()))),
+
+        for txt, val, col in [
+            ("Active Incubators", str(len(incubators)),            GOLD),
+            ("Trays",             f"{tray_count} / {total_capacity}", GOLD),
+            ("Capacity",          f"{fill_pct}% full",             fill_col),
+            ("Total Gals",        f"{total_gals:.1f}",             GOLD),
+            ("Active Alerts",     str(len(db.get_active_alerts())), GOLD),
         ]:
             sf = ctk.CTkFrame(summary_f, fg_color="transparent")
             sf.pack(side="left", padx=20, pady=10)
-            _label(sf, val, ("Segoe UI", 20, "bold"), GOLD).pack()
+            _label(sf, val, ("Segoe UI", 20, "bold"), col).pack()
             _label(sf, txt, FONT_S, SUBTEXT).pack()
 
-        # 2-column card grid
+        # Responsive card grid — rebuilds on window resize (debounced)
         grid = ctk.CTkFrame(container, fg_color="transparent")
         grid.pack(fill="both", expand=True, padx=4)
-        grid.columnconfigure(0, weight=1, uniform="col")
-        grid.columnconfigure(1, weight=1, uniform="col")
+        grid._resize_job = None
 
-        for idx, inc in enumerate(incubators):
-            card = self._make_inc_card(grid, inc)
-            card.grid(row=idx // 2, column=idx % 2,
-                      padx=6, pady=6, sticky="nsew")
+        def _build_grid(cols):
+            self._card_widgets.clear()
+            for child in grid.winfo_children():
+                child.destroy()
+            for c in range(6):
+                grid.columnconfigure(c, weight=1 if c < cols else 0,
+                                     uniform="col" if c < cols else "")
+            for idx, inc in enumerate(incubators):
+                card = self._make_inc_card(grid, inc)
+                card.grid(row=idx // cols, column=idx % cols,
+                          padx=6, pady=6, sticky="nsew")
+
+        def _on_resize(event=None):
+            if grid._resize_job:
+                self.after_cancel(grid._resize_job)
+            def _do():
+                w    = self.winfo_width()
+                cols = 4 if w >= 1400 else (3 if w >= 1000 else 2)
+                if getattr(grid, "_last_cols", None) != cols:
+                    grid._last_cols = cols
+                    _build_grid(cols)
+            grid._resize_job = self.after(200, _do)
+
+        self.bind("<Configure>", _on_resize, add=True)
+        _on_resize()
 
     def _make_inc_card(self, parent, inc: dict) -> ctk.CTkFrame:
-        is_hidden  = bool(inc.get("is_hidden"))
-        card_bg    = "#161E2C" if is_hidden else CARD
-        title_col  = SUBTEXT  if is_hidden else GOLD
-        bdr_col    = "#222D3D" if is_hidden else BORDER
+        is_hidden = bool(inc.get("is_hidden"))
+        card_bg   = "#161E2C" if is_hidden else CARD
+        title_col = SUBTEXT  if is_hidden else GOLD
+        bdr_col   = "#222D3D" if is_hidden else BORDER
 
         card = ctk.CTkFrame(parent, fg_color=card_bg, corner_radius=12,
                             border_width=1, border_color=bdr_col)
 
-        # ── Header ──
+        # ── Readings ──
+        reading = self._govee.get_last(inc["id"])
+        if not reading:
+            db_row  = db.get_latest_reading(inc["id"])
+            reading = {"temp_c": db_row["temperature_c"], "humidity": db_row["humidity_pct"],
+                       "timestamp": db_row["timestamp"]} if db_row else {}
+        temp_c = reading.get("temp_c")
+        hum    = reading.get("humidity")
+
+        t_min, t_max = calc.get_temp_range(inc)
+        if temp_c is not None:
+            unit  = db.get_setting("temp_unit", "C")
+            t_str = calc.format_temp(temp_c, unit)
+            t_col = SUBTEXT if t_min is None else (GREEN if t_min <= temp_c <= t_max else RED)
+            h_col = TEXT
+            problems  = calc.check_temp_humidity(inc, temp_c, hum)
+            dot_color = RED if problems else GREEN
+        else:
+            t_str = "—"
+            t_col = h_col = dot_color = SUBTEXT
+
+        # ── Header: name + chips + status dot ──
         hdr = ctk.CTkFrame(card, fg_color="transparent")
-        hdr.pack(fill="x", padx=14, pady=(12, 4))
+        hdr.pack(fill="x", padx=14, pady=(12, 6))
         name_txt = f"{inc['name']}  (hidden)" if is_hidden else inc["name"]
         _label(hdr, name_txt, FONT_H, title_col).pack(side="left")
-        # Temp mode chip
         mode_key = inc.get("temp_mode", "incubation")
         mode_cfg = calc.TEMP_MODES.get(mode_key, calc.TEMP_MODES["incubation"])
-        ctk.CTkLabel(hdr, text=mode_cfg["label"],
-                     font=("Segoe UI", 9, "bold"),
+        ctk.CTkLabel(hdr, text=mode_cfg["label"], font=("Segoe UI", 9, "bold"),
                      fg_color="#1E3A5F", text_color="#7DD3FC",
-                     corner_radius=4, height=20,
-                     padx=6).pack(side="left", padx=(8, 0))
-        # Alert toggle chip
+                     corner_radius=4, height=20, padx=6).pack(side="left", padx=(8, 0))
         alerts_on = bool(inc.get("temp_alerts_enabled", 1))
-        alert_chip_txt = "🔔 Alerts" if alerts_on else "🔕 Alerts Off"
-        alert_chip_bg  = "#1C3A1C" if alerts_on else "#3A1C1C"
-        alert_chip_fg  = GREEN if alerts_on else "#EF4444"
         ctk.CTkButton(
-            hdr, text=alert_chip_txt,
+            hdr, text="🔔 Alerts" if alerts_on else "🔕 Alerts Off",
             font=("Segoe UI", 9, "bold"),
-            fg_color=alert_chip_bg, hover_color=CARD2,
-            text_color=alert_chip_fg,
+            fg_color="#1C3A1C" if alerts_on else "#3A1C1C",
+            hover_color=CARD2,
+            text_color=GREEN if alerts_on else "#EF4444",
             corner_radius=4, height=20, width=90,
             command=lambda i=inc: self._toggle_temp_alerts(i)
         ).pack(side="left", padx=(6, 0))
+        lbl_dot = _label(hdr, "●", ("Segoe UI", 18), dot_color)
+        lbl_dot.pack(side="right")
 
-        reading = self._govee.get_last(inc["id"])
-        temp_c  = reading.get("temp_c")
-        hum     = reading.get("humidity")
+        # ── Large temp / humidity boxes ──
+        sensor_row = ctk.CTkFrame(card, fg_color="transparent")
+        sensor_row.pack(fill="x", padx=12, pady=(0, 8))
+        sensor_row.columnconfigure(0, weight=1)
+        sensor_row.columnconfigure(1, weight=1)
 
-        # Status dot
-        if temp_c is not None:
-            problems = calc.check_temp_humidity(inc, temp_c, hum)
-            dot_color = RED if problems else GREEN
-        else:
-            dot_color = SUBTEXT
-        _label(hdr, "●", ("Segoe UI", 18), dot_color).pack(side="right")
+        tf = ctk.CTkFrame(sensor_row, fg_color=CARD2, corner_radius=8)
+        tf.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        _label(tf, "Temp", FONT_S, SUBTEXT).pack(pady=(8, 0))
+        lbl_temp = _label(tf, t_str if temp_c is not None else "—", ("Segoe UI", 22, "bold"), t_col)
+        lbl_temp.pack(pady=(2, 8))
 
-        # ── Readings ──
-        rf = ctk.CTkFrame(card, fg_color=CARD2, corner_radius=8)
-        rf.pack(fill="x", padx=12, pady=4)
-        if temp_c is not None:
-            unit = db.get_setting("temp_unit", "C")
-            t_str = calc.format_temp(temp_c, unit)
-            t_min, t_max = calc.get_temp_range(inc)
-            t_col = GREEN if t_min <= temp_c <= t_max else RED
-            h_col = GREEN if float(inc.get("humidity_min",55)) <= hum <= float(inc.get("humidity_max",75)) else RED
-            _label(rf, f"🌡 {t_str}", FONT_B, t_col).pack(
-                side="left", padx=12, pady=6)
-            _label(rf, f"💧 {hum:.0f}%", FONT_B, h_col).pack(
-                side="right", padx=12, pady=6)
-            ts = (reading.get("timestamp") or "")[:16].replace("T", " ")
-            _label(rf, ts, FONT_S, SUBTEXT).pack(pady=2)
-        else:
-            _label(rf, "No sensor data — set Govee device in Settings",
-                   FONT_S, SUBTEXT).pack(padx=12, pady=8)
+        hf = ctk.CTkFrame(sensor_row, fg_color=CARD2, corner_radius=8)
+        hf.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        _label(hf, "Humidity", FONT_S, SUBTEXT).pack(pady=(8, 0))
+        lbl_hum = _label(hf, f"{hum:.0f}%" if hum is not None else "—", ("Segoe UI", 22, "bold"), h_col)
+        lbl_hum.pack(pady=(2, 8))
 
-        # ── Tray count ──
-        trays      = db.get_trays(incubator_id=inc["id"], status="active")
-        total_gals = sum(t.get("volume_gal") or 0 for t in trays)
-        tf = ctk.CTkFrame(card, fg_color="transparent")
-        tf.pack(fill="x", padx=14, pady=2)
-        _label(tf, f"Trays: {len(trays)} / {inc.get('capacity',50)}", FONT_B, TEXT).pack(side="left")
-        _label(tf, f"{total_gals:.1f} gal", FONT_B, SUBTEXT).pack(side="right")
+        # ── Bottom row: status/events left, tray info right ──
+        bottom = ctk.CTkFrame(card, fg_color="transparent")
+        bottom.pack(fill="x", padx=14, pady=(0, 6))
+        bottom.columnconfigure(0, weight=1)
+        bottom.columnconfigure(1, weight=1)
 
-        # ── Next event ──
+        # Left: last poll time + next event
+        left = ctk.CTkFrame(bottom, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="w")
+        _poll_txt, _poll_col = _poll_age(reading.get("timestamp"))
+        lbl_ts = _label(left, f"Last polled: {_poll_txt}", FONT_S, _poll_col)
+        lbl_ts.pack(anchor="w")
+        self._card_widgets[inc["id"]] = {"temp": lbl_temp, "hum": lbl_hum,
+                                          "dot": lbl_dot, "ts": lbl_ts, "inc": inc}
         batches = db.get_batches(incubator_id=inc["id"], status="active")
         events  = calc.get_all_events(batches, lookahead_days=14)
         if events:
             ev   = events[0]
             ecol = RED if ev["urgent"] else (ORANGE if ev["days_away"] <= 5 else TEXT)
-            etxt = f"-> {ev['label']}: {calc.format_days(ev['days_away'])}"
-            _label(card, etxt, FONT_S, ecol).pack(padx=14, anchor="w", pady=2)
+            _label(left, f"→ {ev['label']}: {calc.format_days(ev['days_away'])}", FONT_S, ecol).pack(anchor="w")
         else:
-            _label(card, "No upcoming events", FONT_S, SUBTEXT).pack(
-                padx=14, anchor="w", pady=2)
+            _label(left, "No upcoming events", FONT_S, SUBTEXT).pack(anchor="w")
 
-        # ── Inspection status badges (only when visible) ──
+        # Right: tray count + fill % — aggregate query, no full row fetch
+        right = ctk.CTkFrame(bottom, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="e")
+        _ts    = db.get_tray_stats(incubator_id=inc["id"], status="active")
+        capacity   = inc.get("capacity") or 50
+        fill_pct   = round(_ts["count"] / capacity * 100) if capacity else 0
+        _label(right, f"{_ts['count']} / {capacity} trays", FONT_S, TEXT).pack(anchor="e")
+        _label(right, f"{fill_pct}% filled  •  {_ts['total_gals']:.1f} gal", FONT_S, SUBTEXT).pack(anchor="e")
+
+        # ── Inspection badges ──
         if not is_hidden:
             brow = ctk.CTkFrame(card, fg_color="transparent")
-            brow.pack(fill="x", padx=12, pady=(4, 2))
+            brow.pack(fill="x", padx=12, pady=(2, 10))
             _label(brow, "Inspections:", FONT_S, SUBTEXT).pack(side="left", padx=(2, 6))
             make_status_badges(brow, inc["id"]).pack(side="left")
-
-        # ── Buttons ──
-        bf = ctk.CTkFrame(card, fg_color="transparent")
-        bf.pack(fill="x", padx=8, pady=(4, 10))
-
-        if is_hidden:
-            # Hidden card — just Unhide + Details
-            _btn(bf, "Unhide", lambda i=inc["id"]: self._set_hidden(i, False),
-                 width=90, height=28, fg="#065F46", hover=TEAL,
-                 text_color="white").pack(side="left", padx=4)
-            _btn(bf, "Details", lambda i=inc: self._open_inc_detail_window(i),
-                 width=80, height=28, fg=BORDER, hover=CARD2).pack(side="left", padx=2)
         else:
-            _btn(bf, "Details", lambda i=inc: self._open_inc_detail_window(i),
-                 width=80, height=28, fg=BORDER, hover=CARD2).pack(side="left", padx=4)
-            _btn(bf, "+ Batch", lambda i=inc["id"]: self._open_batch_dialog(incubator_id=i),
-                 width=78, height=28, fg=BORDER, hover=CARD2).pack(side="left", padx=2)
-            _btn(bf, "Inspect", lambda i=inc: self._open_inspection_form(i),
-                 width=90, height=28, fg=BLUE, hover="#1D4ED8",
-                 text_color="white").pack(side="left", padx=2)
-            _btn(bf, "Hide", lambda i=inc["id"]: self._set_hidden(i, True),
-                 width=60, height=28, fg=CARD2, hover=BORDER,
-                 text_color=SUBTEXT).pack(side="left", padx=2)
-            _btn(bf, "+ Tray", lambda i=inc["id"]: self._open_tray_dialog(incubator_id=i),
-                 width=75, height=28, fg=DK_GOLD, hover=GOLD,
-                 text_color="black").pack(side="right", padx=4)
+            # Hidden cards just need bottom padding
+            ctk.CTkFrame(card, fg_color="transparent", height=6).pack()
+
+        # Whole card is clickable — navigates to detail
+        def _go_detail(event, i=inc):
+            self._show_inc_detail(i)
+
+        def _bind_recursive(widget):
+            widget.bind("<Button-1>", _go_detail)
+            for child in widget.winfo_children():
+                _bind_recursive(child)
+
+        _bind_recursive(card)
 
         return card
 
@@ -1083,7 +1161,6 @@ class IncubationApp(ctk.CTk):
         for w in container.winfo_children():
             w.destroy()
 
-        incubators = db.get_incubators()
         incubators = db.get_incubators(include_hidden=True)
         if not incubators:
             _label(container, "No incubators yet.", FONT_B, SUBTEXT).pack(pady=20)
@@ -1113,6 +1190,9 @@ class IncubationApp(ctk.CTk):
                              height=20).pack(side="left", padx=8)
 
             reading = self._govee.get_last(inc["id"])
+            if not reading:
+                db_row  = db.get_latest_reading(inc["id"])
+                reading = {"temp_c": db_row["temperature_c"], "humidity": db_row["humidity_pct"], "timestamp": db_row["timestamp"]} if db_row else {}
             temp_c  = reading.get("temp_c")
             if temp_c is not None:
                 unit  = db.get_setting("temp_unit", "C")
@@ -1125,8 +1205,7 @@ class IncubationApp(ctk.CTk):
             _mode_key = inc.get("temp_mode", "incubation")
             _mode_cfg = calc.TEMP_MODES.get(_mode_key, calc.TEMP_MODES["incubation"])
             info_txt = (f"Capacity: {inc.get('capacity',50)} trays  |  "
-                        f"{_mode_cfg['label']}: {_mode_cfg['min']}–{_mode_cfg['max']}°C  |  "
-                        f"H: {inc.get('humidity_min',55)}–{inc.get('humidity_max',75)}%")
+                        f"{_mode_cfg['label']}: {_mode_cfg['min']}–{_mode_cfg['max']}°C")
             _label(left, info_txt, FONT_S, SUBTEXT).pack(anchor="w")
 
             govee_txt = (f"Govee: {inc.get('govee_device_id') or 'not set'}  "
@@ -1256,8 +1335,25 @@ class IncubationApp(ctk.CTk):
         _label(hdr, "Trays", FONT_H, GOLD).pack(side="left")
         _btn(hdr, "+ Add Tray", lambda: self._open_tray_dialog(),
              fg=DK_GOLD, hover=GOLD, text_color="black", width=110).pack(side="right")
+        _btn(hdr, "🗑 Delete All", self._delete_all_trays,
+             fg=RED, hover="#B91C1C", text_color="white", width=110).pack(side="right", padx=6)
+        _btn(hdr, "Set Status →", self._bulk_set_status,
+             fg=BLUE, hover="#1D4ED8", text_color="white", width=110).pack(side="right", padx=(6, 0))
+        self._bulk_status = _combo(hdr, ["active", "cooled", "released", "removed"], 120)
+        self._bulk_status.set("released")
+        self._bulk_status.pack(side="right", padx=6)
         _btn(hdr, "QR Code", self._show_selected_qr,
              fg=CARD, hover=CARD2, width=90).pack(side="right", padx=6)
+        _btn(hdr, "History", self._show_tray_history,
+             fg=CARD, hover=CARD2, width=90).pack(side="right", padx=6)
+        _btn(hdr, "Release CSV", lambda: self._release_csv_import(on_complete=self._refresh_trays),
+             fg="#7C3AED", hover="#6D28D9", text_color="white", width=110).pack(side="right", padx=6)
+        _btn(hdr, "⬇ Release Template", lambda: self._release_csv_template(),
+             fg=BORDER, hover=CARD2, width=150).pack(side="right", padx=(0, 2))
+        _btn(hdr, "Import CSV", lambda: self._tray_csv_import(on_complete=self._refresh_trays),
+             fg=TEAL, hover="#0D9488", text_color="white", width=100).pack(side="right", padx=6)
+        _btn(hdr, "⬇ Template", lambda: self._tray_csv_template(),
+             fg=BORDER, hover=CARD2, width=110).pack(side="right", padx=(0, 2))
 
         # Filter bar
         fbar = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=8)
@@ -1283,18 +1379,66 @@ class IncubationApp(ctk.CTk):
         self._tray_tree = self._make_tree(frame, cols)
         self._tray_tree.pack(fill="both", expand=True, padx=12, pady=4)
         self._tray_tree.bind("<Double-1>", self._on_tray_double_click)
+        self._tray_sort_col = None   # currently sorted column index
+        self._tray_sort_asc = True
+
+        for ci, col in enumerate(cols):
+            self._tray_tree.heading(col, text=col,
+                command=lambda c=ci: self._sort_tray_tree(c))
+
         return frame
+
+    def _sort_tray_tree(self, col_idx: int):
+        tree = self._tray_tree
+        if self._tray_sort_col == col_idx:
+            self._tray_sort_asc = not self._tray_sort_asc
+        else:
+            self._tray_sort_col = col_idx
+            self._tray_sort_asc = True
+
+        # Update heading arrows
+        cols = ("Tray #", "Sample", "Incubator", "Batch",
+                "Weight (lbs)", "Volume (gal)", "Live Count",
+                "Parasite %", "In Date", "Out Date", "Status")
+        for ci, col in enumerate(cols):
+            arrow = (" ↑" if self._tray_sort_asc else " ↓") if ci == col_idx else ""
+            tree.heading(col, text=col + arrow,
+                command=lambda c=ci: self._sort_tray_tree(c))
+
+        rows = [(tree.set(iid, cols[col_idx]), iid) for iid in tree.get_children()]
+
+        def _sort_key(val):
+            # Try numeric sort for number columns, fallback to string
+            try:
+                return (0, float(val.replace("%", "").replace("—", ""))) if val != "—" else (1, "")
+            except (ValueError, AttributeError):
+                return (0, val.lower()) if val != "—" else (1, "")
+
+        rows.sort(key=lambda x: _sort_key(x[0]), reverse=not self._tray_sort_asc)
+        for idx, (_, iid) in enumerate(rows):
+            tree.move(iid, "", idx)
 
     def _refresh_trays(self):
         tree = self._tray_tree
         tree.delete(*tree.get_children())
+        # Reset sort state on refresh
+        self._tray_sort_col = None
+        self._tray_sort_asc = True
+        cols = ("Tray #", "Sample", "Incubator", "Batch",
+                "Weight (lbs)", "Volume (gal)", "Live Count",
+                "Parasite %", "In Date", "Out Date", "Status")
+        for col in cols:
+            tree.heading(col, text=col,
+                command=lambda c=cols.index(col): self._sort_tray_tree(c))
 
         inc_id = self._flt_inc_map.get(self._flt_inc.get())
         status = self._flt_status.get()
         status = None if status == "All" else status
 
-        for t in db.get_trays(incubator_id=inc_id, status=status):
-            tree.insert("", "end", iid=str(t["id"]), values=(
+        trays = db.get_trays(incubator_id=inc_id, status=status)
+        # Build all row tuples first, then insert in one pass
+        rows = [
+            (str(t["id"]), (
                 t["tray_number"],
                 t.get("sample_name") or "—",
                 t.get("incubator_name") or "—",
@@ -1307,6 +1451,10 @@ class IncubationApp(ctk.CTk):
                 t.get("out_date") or "—",
                 t.get("status") or "active",
             ))
+            for t in trays
+        ]
+        for iid, values in rows:
+            tree.insert("", "end", iid=iid, values=values)
 
     def _on_tray_double_click(self, event):
         sel = self._tray_tree.selection()
@@ -1325,6 +1473,43 @@ class IncubationApp(ctk.CTk):
         tray = db.get_tray_by_id(int(sel[0]))
         if tray:
             QRDialog(self, tray, port=self._qr_port)
+
+    def _show_tray_history(self):
+        """Show every season's record for the selected tray number."""
+        sel = self._tray_tree.selection()
+        if not sel:
+            messagebox.showinfo("History", "Select a tray first.", parent=self)
+            return
+        tray = db.get_tray_by_id(int(sel[0]))
+        if not tray:
+            return
+        tray_number = tray["tray_number"]
+        history = db.get_tray_history(tray_number)
+
+        win = ctk.CTkToplevel(self)
+        win.title(f"History — {tray_number}")
+        win.geometry("760x420")
+        win.minsize(640, 320)
+        win.grab_set()
+
+        _label(win, f"Tray {tray_number} — {len(history)} record(s)",
+               FONT_H, GOLD).pack(anchor="w", padx=16, pady=(14, 6))
+
+        cols = ("Status", "Sample", "Incubator", "In Date", "Out Date", "Notes")
+        tree = self._make_tree(win, cols)
+        tree.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        tree.column("Notes", width=240, anchor="w")
+
+        for h in history:  # newest first (get_tray_history orders by id DESC)
+            note = (h.get("notes") or "").replace("\n", "  •  ")
+            tree.insert("", "end", values=(
+                h.get("status") or "active",
+                h.get("sample_name")    or "—",
+                h.get("incubator_name") or "—",
+                h.get("in_date")  or "—",
+                h.get("out_date") or "—",
+                note or "—",
+            ))
 
     # ══════════════════════════════════════════════════════════════════════════
     #  TIMELINE VIEW
@@ -1425,6 +1610,23 @@ class IncubationApp(ctk.CTk):
              text_color="white", width=150).grid(row=1, column=1, sticky="w", padx=4, pady=4)
         self._govee_status_lbl = _label(gf, "", FONT_S, SUBTEXT)
         self._govee_status_lbl.grid(row=2, column=1, sticky="w", padx=4, pady=2)
+
+        # Background Poller
+        bf = section("Background Poller")
+        _label(bf,
+               "Run a lightweight background task that collects Govee readings\n"
+               "even when this window is closed.  Enable it on one computer only\n"
+               "— the one that stays on — to avoid duplicate writes.",
+               FONT_S, SUBTEXT).pack(anchor="w", padx=14, pady=(0, 6))
+        btn_row = ctk.CTkFrame(bf, fg_color="transparent")
+        btn_row.pack(anchor="w", padx=14, pady=(0, 4))
+        _btn(btn_row, "Enable on this computer",  self._enable_poller,
+             fg=GREEN, hover="#15803D", text_color="white", width=200).pack(side="left", padx=(0, 8))
+        _btn(btn_row, "Disable on this computer", self._disable_poller,
+             fg=RED,   hover="#991B1B", text_color="white", width=200).pack(side="left")
+        self._poller_status_lbl = _label(bf, "", FONT_S, SUBTEXT)
+        self._poller_status_lbl.pack(anchor="w", padx=14, pady=(0, 8))
+        self._refresh_poller_status()
 
         # Poll interval
         pf = section("Polling & Thresholds")
@@ -1647,6 +1849,97 @@ class IncubationApp(ctk.CTk):
             "Restart the app for the change to take effect.",
             parent=self)
 
+    # ── Background poller ──────────────────────────────────────────────────────
+
+    _TASK_NAME   = "BeeIncubationPoller"
+    _POLLER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "govee_poller.py")
+
+    def _poller_installed(self) -> bool:
+        import winreg
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Microsoft\Windows\CurrentVersion\Run")
+            winreg.QueryValueEx(key, self._TASK_NAME)
+            winreg.CloseKey(key)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def _refresh_poller_status(self):
+        import json, socket
+        installed = self._poller_installed()
+        # Check lock file for active machine info
+        lock_file = os.path.join(os.path.dirname(db.DB_PATH), "govee_poller.lock")
+        lock_info = ""
+        try:
+            with open(lock_file, encoding="utf-8") as f:
+                lock = json.load(f)
+            lock_info = f"  |  Active on: {lock.get('machine')}  (last seen {lock.get('last_seen', '')[:19]})"
+        except Exception:
+            pass
+        if installed:
+            self._poller_status_lbl.configure(
+                text=f"Enabled on this computer ({socket.gethostname()}){lock_info}",
+                text_color=GREEN)
+        else:
+            self._poller_status_lbl.configure(
+                text=f"Not enabled on this computer{lock_info}",
+                text_color=SUBTEXT)
+
+    def _kill_poller_processes(self):
+        import subprocess
+        subprocess.run(
+            ["wmic", "process", "where", "commandline like '%govee_poller%'", "delete"],
+            capture_output=True
+        )
+
+    def _enable_poller(self):
+        import subprocess, sys, winreg
+        self._kill_poller_processes()  # stop any existing instances first
+        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        if not os.path.exists(pythonw):
+            pythonw = sys.executable
+        cmd = f'"{pythonw}" "{self._POLLER_SCRIPT}"'
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Microsoft\Windows\CurrentVersion\Run",
+                                 0, winreg.KEY_SET_VALUE)
+            winreg.SetValueEx(key, self._TASK_NAME, 0, winreg.REG_SZ, cmd)
+            winreg.CloseKey(key)
+        except Exception as exc:
+            messagebox.showerror("Background Poller",
+                f"Could not register startup entry:\n{exc}", parent=self)
+            return
+        # Start it immediately too
+        subprocess.Popen([pythonw, self._POLLER_SCRIPT])
+        self._refresh_poller_status()
+        messagebox.showinfo("Background Poller",
+            "Poller enabled and started.\n\n"
+            "It will run automatically each time you log in to Windows.\n"
+            "Check govee_poller.log (next to incubation.db) for activity.",
+            parent=self)
+
+    def _disable_poller(self):
+        import winreg
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Microsoft\Windows\CurrentVersion\Run",
+                                 0, winreg.KEY_SET_VALUE)
+            winreg.DeleteValue(key, self._TASK_NAME)
+            winreg.CloseKey(key)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            messagebox.showerror("Background Poller",
+                f"Could not remove startup entry:\n{exc}", parent=self)
+            return
+        # Kill all running govee_poller.py processes
+        self._kill_poller_processes()
+        self._refresh_poller_status()
+        messagebox.showinfo("Background Poller",
+            "Poller disabled and stopped on this computer.",
+            parent=self)
+
     def _test_govee(self):
         key = self._set["govee_api_key"].get()
         if not key:
@@ -1662,6 +1955,9 @@ class IncubationApp(ctk.CTk):
             self._govee_status_lbl.configure(
                 text=f"Connection failed: {tmp.status_label()}", text_color=RED)
             return
+
+        db.set_setting("govee_api_key", key)
+        self._govee.set_api_key(key)
 
         sensors = [d for d in devices if d.get("is_sensor")]
         others  = [d for d in devices if not d.get("is_sensor")]
@@ -1775,6 +2071,408 @@ class IncubationApp(ctk.CTk):
 
     def _open_incubator_dialog(self, inc: dict = None):
         IncubatorDialog(self, inc, on_save=lambda: self._refresh_current())
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  INCUBATOR DETAIL VIEW
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _show_inc_detail(self, inc: dict):
+        """Navigate to the full-screen detail view for one incubator."""
+        self._detail_inc = inc
+        self.show_view("inc_detail")
+
+    def _build_inc_detail_view(self) -> ctk.CTkFrame:
+        frame = ctk.CTkFrame(self._main, fg_color="transparent", corner_radius=0)
+        frame._content = None  # placeholder; built in _refresh_inc_detail
+        return frame
+
+    def _refresh_inc_detail(self):
+        frame = self._views["inc_detail"]
+
+        # Remember which tab was open before we tear down
+        _prev_tab = getattr(frame, "_active_tab", "Inspections")
+
+        # Destroy previous content
+        for w in frame.winfo_children():
+            w.destroy()
+
+        inc = self._detail_inc
+        if not inc:
+            _label(frame, "No incubator selected.", FONT_B, SUBTEXT).pack(pady=40)
+            return
+
+        # Re-fetch incubator to get fresh data
+        fresh = next((x for x in db.get_incubators(include_hidden=True)
+                      if x["id"] == inc["id"]), inc)
+
+        unit = db.get_setting("temp_unit", "C")
+
+        # ── Top bar ──────────────────────────────────────────────────────────
+        topbar = ctk.CTkFrame(frame, fg_color=SIDEBAR, corner_radius=0)
+        topbar.pack(fill="x")
+
+        _btn(topbar, "← Back", lambda: self.show_view("dashboard"),
+             width=90, height=32, fg="transparent", hover=CARD,
+             text_color=SUBTEXT).pack(side="left", padx=8, pady=8)
+
+        _label(topbar, fresh["name"], FONT_H, GOLD).pack(side="left", padx=(4, 16))
+
+        reading = self._govee.get_last(fresh["id"])
+        if not reading:
+            db_row  = db.get_latest_reading(fresh["id"])
+            reading = {"temp_c": db_row["temperature_c"], "humidity": db_row["humidity_pct"]} if db_row else {}
+
+        if reading.get("temp_c") is not None:
+            t_min, t_max = calc.get_temp_range(fresh)
+            t_col = SUBTEXT if t_min is None else (
+                GREEN if t_min <= reading["temp_c"] <= t_max else RED)
+            ctk.CTkLabel(topbar,
+                text=calc.format_temp(reading["temp_c"], unit),
+                font=("Segoe UI", 13, "bold"), text_color=t_col,
+                fg_color=CARD, corner_radius=6, padx=10, height=32,
+            ).pack(side="left", padx=4, pady=8)
+            ctk.CTkLabel(topbar,
+                text=f"{reading['humidity']:.0f}% RH",
+                font=("Segoe UI", 13, "bold"), text_color=TEXT,
+                fg_color=CARD, corner_radius=6, padx=10, height=32,
+            ).pack(side="left", padx=4, pady=8)
+
+        _btn(topbar, "Inspect Now", lambda i=fresh: self._open_inspection_form(i),
+             width=110, height=32, fg=BLUE, hover="#1D4ED8",
+             text_color="white").pack(side="right", padx=12, pady=8)
+
+        # ── Control row ───────────────────────────────────────────────────────
+        ctrl = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=0)
+        ctrl.pack(fill="x")
+
+        _label(ctrl, "Temp Mode:", FONT_S, SUBTEXT).pack(side="left", padx=(16, 6), pady=8)
+
+        _det_mode_key = fresh.get("temp_mode", "incubation")
+        _det_mode_var = ctk.StringVar(value=calc.TEMP_MODES.get(_det_mode_key, calc.TEMP_MODES["incubation"])["label"])
+        _det_range_lbl = _label(ctrl, "", FONT_S, SUBTEXT)
+
+        def _update_range_lbl(cfg, lbl=_det_range_lbl):
+            if cfg["min"] is None:
+                lbl.configure(text="No alerts")
+            else:
+                lbl.configure(text=f"{cfg['min']}–{cfg['max']} °C")
+
+        _update_range_lbl(calc.TEMP_MODES.get(_det_mode_key, calc.TEMP_MODES["incubation"]))
+
+        def _on_detail_mode(label, iid=fresh["id"]):
+            key = calc._MODE_BY_LABEL.get(label, "incubation")
+            db.set_incubator_temp_mode(iid, key)
+            _update_range_lbl(calc.TEMP_MODES[key])
+            self._refresh_current()
+
+        ctk.CTkSegmentedButton(
+            ctrl,
+            values=[v["label"] for v in calc.TEMP_MODES.values()],
+            variable=_det_mode_var,
+            command=_on_detail_mode,
+            width=320, height=28,
+        ).pack(side="left", padx=4)
+        _det_range_lbl.pack(side="left", padx=(10, 20))
+
+        _alerts_on = bool(fresh.get("temp_alerts_enabled", 1))
+        _alert_sv  = ctk.StringVar(value="🔔  Alerts On" if _alerts_on else "🔕  Alerts Off")
+
+        def _toggle_alert(iid=fresh["id"], sv=_alert_sv):
+            cur = next((x for x in db.get_incubators(include_hidden=True) if x["id"] == iid), {})
+            new = not bool(cur.get("temp_alerts_enabled", 1))
+            db.set_incubator_alerts_enabled(iid, new)
+            sv.set("🔔  Alerts On" if new else "🔕  Alerts Off")
+            self._refresh_current()
+
+        ctk.CTkButton(
+            ctrl, textvariable=_alert_sv, font=FONT_S,
+            fg_color=BORDER, hover_color=CARD2, text_color=TEXT,
+            width=130, height=28, command=_toggle_alert,
+        ).pack(side="left", pady=8)
+
+        # ── Scrollable body ───────────────────────────────────────────────────
+        body = ctk.CTkScrollableFrame(frame, fg_color="transparent", corner_radius=0)
+        body.pack(fill="both", expand=True)
+
+        # ── Temperature / Humidity Chart with time-range selector ────────────
+        chart_frame = ctk.CTkFrame(body, fg_color=CARD, corner_radius=10)
+        chart_frame.pack(fill="x", padx=16, pady=(12, 8))
+
+        _RANGES = [
+            ("1H",    1),
+            ("24H",   24),
+            ("7D",    24 * 7),
+            ("Month", 24 * 30),
+        ]
+        _chart_range_var = ctk.StringVar(value="24H")
+
+        # Header row: title left, range buttons right
+        chart_hdr = ctk.CTkFrame(chart_frame, fg_color="transparent")
+        chart_hdr.pack(fill="x", padx=14, pady=(10, 4))
+        # Pack right-side elements first so tkinter reserves space before left fills
+        _range_btns: dict = {}
+        btn_row = ctk.CTkFrame(chart_hdr, fg_color="transparent")
+        btn_row.pack(side="right")
+
+        chart_title = _label(chart_hdr, "Last 24 Hours", FONT_B, GOLD)
+        chart_title.pack(side="left")
+
+        # Canvas holder — we replace its contents when the range changes
+        chart_canvas_frame = ctk.CTkFrame(chart_frame, fg_color="transparent")
+        chart_canvas_frame.pack(fill="x", padx=8, pady=(0, 10))
+
+        def _draw_chart(hours: float, label: str):
+            for w in chart_canvas_frame.winfo_children():
+                w.destroy()
+            chart_title.configure(text=f"Last {label}")
+
+            # Highlight active button
+            for lbl, btn in _range_btns.items():
+                btn.configure(fg_color=GOLD if lbl == label else BORDER,
+                              text_color="black" if lbl == label else TEXT)
+
+            if not HAS_MPL:
+                _label(chart_canvas_frame, "Install matplotlib to view chart.",
+                       FONT_S, SUBTEXT).pack(pady=16)
+                return
+
+            readings = db.get_readings_hours(fresh["id"], hours)
+            if not readings:
+                _label(chart_canvas_frame,
+                       f"No readings in the last {label}.",
+                       FONT_S, SUBTEXT).pack(pady=16)
+                return
+
+            try:
+                timestamps = [datetime.fromisoformat(r["timestamp"]) for r in readings]
+                temps      = [r["temperature_c"] for r in readings]
+                hums       = [r["humidity_pct"]  for r in readings]
+                if unit == "F":
+                    temps = [calc.c_to_f(t) for t in temps]
+                temp_lbl = f"Temp (°{unit})"
+
+                fig = Figure(figsize=(10, 2.8), facecolor="#1F2937")
+                ax1 = fig.add_subplot(111)
+                ax2 = ax1.twinx()
+
+                ax1.plot(timestamps, temps, color="#FFD700", linewidth=1.8)
+                ax2.plot(timestamps, hums,  color="#60A5FA", linewidth=1.2,
+                         alpha=0.6, linestyle="--")
+
+                t_min, t_max = calc.get_temp_range(fresh)
+                if t_min is not None:
+                    _lo = calc.c_to_f(t_min) if unit == "F" else t_min
+                    _hi = calc.c_to_f(t_max) if unit == "F" else t_max
+                    ax1.axhline(_lo, color="#EF4444", linewidth=0.8, linestyle=":")
+                    ax1.axhline(_hi, color="#EF4444", linewidth=0.8, linestyle=":")
+
+                for ax in (ax1, ax2):
+                    ax.set_facecolor("#1F2937")
+                    ax.tick_params(colors="#9CA3AF", labelsize=8)
+                    for spine in ax.spines.values():
+                        spine.set_edgecolor("#374151")
+
+                ax1.set_ylabel(temp_lbl, color="#FFD700", fontsize=8)
+                ax2.set_ylabel("Humidity %", color="#60A5FA", fontsize=8)
+
+                # Pick x-axis format based on range
+                if hours <= 1:
+                    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                    ax1.xaxis.set_major_locator(mdates.MinuteLocator(interval=10))
+                elif hours <= 24:
+                    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+                    ax1.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+                elif hours <= 24 * 7:
+                    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%a %d"))
+                    ax1.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+                else:
+                    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+                    ax1.xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
+
+                for lbl in ax1.xaxis.get_majorticklabels():
+                    lbl.set_rotation(0)
+                fig.tight_layout(pad=1.0)
+
+                canvas = FigureCanvasTkAgg(fig, master=chart_canvas_frame)
+                canvas.draw()
+                canvas.get_tk_widget().pack(fill="x")
+            except Exception as exc:
+                _label(chart_canvas_frame, f"Chart error: {exc}", FONT_S, RED).pack(pady=10)
+
+        for range_label, range_hours in _RANGES:
+            rl, rh = range_label, range_hours
+            b = ctk.CTkButton(
+                btn_row, text=rl, width=52, height=26,
+                fg_color=GOLD if rl == "24H" else BORDER,
+                hover_color=CARD2,
+                text_color="black" if rl == "24H" else TEXT,
+                corner_radius=5, font=FONT_S,
+                command=lambda lbl=rl, hrs=rh: _draw_chart(hrs, lbl),
+            )
+            b.pack(side="left", padx=2)
+            _range_btns[rl] = b
+
+        # Defer chart so the screen appears instantly, then render after
+        frame.after(50, lambda: _draw_chart(24, "24H"))
+
+        # ── Tabs: Inspections / Batches / Trays / VOC ─────────────────────────
+        # Tabs are built lazily — content is only created the first time each tab is selected.
+        tabs = ctk.CTkTabview(body, fg_color=CARD, corner_radius=8)
+        tabs.pack(fill="both", expand=True, padx=16, pady=(4, 12))
+
+        _tab_built: set = set()
+
+        def _build_inspections_tab():
+            it = tabs.tab("Inspections")
+            InspectionsLogPanel(it, fixed_incubator_id=fresh["id"]).pack(fill="both", expand=True)
+
+        def _build_batches_tab():
+            bt = tabs.tab("Batches")
+            bscroll = ctk.CTkScrollableFrame(bt, fg_color="transparent")
+            bscroll.pack(fill="both", expand=True)
+            batches = db.get_batches(incubator_id=fresh["id"])
+            if batches:
+                for batch in batches:
+                    bf = ctk.CTkFrame(bscroll, fg_color=CARD2, corner_radius=8)
+                    bf.pack(fill="x", pady=4, padx=4)
+                    bname = batch.get("name") or f"Batch {batch['id']}"
+                    _label(bf, bname, FONT_B, GOLD).pack(anchor="w", padx=10, pady=(8, 2))
+                    for fld, lbl in calc.BATCH_EVENT_FIELDS:
+                        val = batch.get(fld)
+                        if val:
+                            d    = calc.days_from_now(val)
+                            line = f"{lbl}: {val[:10]}  ({calc.format_days(d)})"
+                            col  = (RED    if d is not None and d <= 1
+                                    else ORANGE if d is not None and d <= 5
+                                    else SUBTEXT)
+                            _label(bf, line, FONT_S, col).pack(anchor="w", padx=14, pady=1)
+                    ctk.CTkFrame(bf, fg_color="transparent", height=6).pack()
+            else:
+                _label(bscroll, "No batches for this incubator.", FONT_S, SUBTEXT).pack(pady=16)
+
+        def _build_trays_tab():
+            tt = tabs.tab("Trays")
+            tray_hdr = ctk.CTkFrame(tt, fg_color="transparent")
+            tray_hdr.pack(fill="x", padx=8, pady=(8, 4))
+            tscroll = ctk.CTkScrollableFrame(tt, fg_color="transparent")
+            tscroll.pack(fill="both", expand=True)
+
+            _tray_checks: dict = {}
+
+            def _update_delete_btn():
+                n = sum(1 for v in _tray_checks.values() if v.get())
+                if n:
+                    delete_btn.configure(text=f"Delete {n} Selected",
+                                         fg_color=RED, hover_color="#B91C1C", state="normal")
+                else:
+                    delete_btn.configure(text="Delete Selected",
+                                         fg_color=BORDER, hover_color=CARD2, state="disabled")
+
+            def _select_all_toggle():
+                all_on = all(v.get() for v in _tray_checks.values()) if _tray_checks else False
+                for v in _tray_checks.values():
+                    v.set(not all_on)
+                _update_delete_btn()
+
+            def _delete_selected():
+                ids = [tid for tid, v in _tray_checks.items() if v.get()]
+                if not ids:
+                    return
+                if not messagebox.askyesno("Delete Trays",
+                        f"Permanently delete {len(ids)} tray(s)?\nThis cannot be undone.",
+                        parent=self):
+                    return
+                for tid in ids:
+                    db.delete_tray(tid)
+                _refresh_tray_list()
+
+            def _refresh_tray_list():
+                _tray_checks.clear()
+                for w in tscroll.winfo_children():
+                    w.destroy()
+                trays = db.get_trays(incubator_id=fresh["id"])
+                tray_count_lbl.configure(text=f"{len(trays)} tray(s)")
+                _update_delete_btn()
+                if trays:
+                    for tray in trays:
+                        var = ctk.BooleanVar(value=False)
+                        _tray_checks[tray["id"]] = var
+                        tr = ctk.CTkFrame(tscroll, fg_color=CARD2, corner_radius=6)
+                        tr.pack(fill="x", pady=2, padx=4)
+                        ctk.CTkCheckBox(tr, text="", variable=var,
+                            width=20, checkbox_width=18, checkbox_height=18,
+                            fg_color=RED, hover_color="#B91C1C",
+                            command=_update_delete_btn,
+                        ).pack(side="left", padx=(8, 4), pady=6)
+                        _label(tr, f"Tray {tray['tray_number']}", FONT_B, TEXT).pack(
+                            side="left", padx=(4, 8), pady=6)
+                        _label(tr,
+                            f"{tray.get('sample_name') or '—'}  "
+                            f"{tray.get('volume_gal') or '—'} gal  "
+                            f"{tray.get('status') or 'active'}",
+                            FONT_S, SUBTEXT).pack(side="left", padx=4)
+                        _btn(tr, "QR", lambda t=tray: QRDialog(self, t, port=self._qr_port),
+                             width=50, height=24, fg=BORDER, hover=CARD).pack(side="right", padx=8)
+                else:
+                    _label(tscroll, "No trays yet. Add one or import a CSV.",
+                           FONT_S, SUBTEXT).pack(pady=16)
+
+            tray_count_lbl = _label(tray_hdr, "", FONT_S, SUBTEXT)
+            tray_count_lbl.pack(side="left")
+            _btn(tray_hdr, "⬇ Template",
+                 lambda: self._tray_csv_template(default_incubator_name=fresh["name"]),
+                 width=110, height=28, fg=BORDER, hover=CARD2).pack(side="right", padx=(4, 0))
+            _btn(tray_hdr, "Import CSV",
+                 lambda: self._tray_csv_import(default_incubator_id=fresh["id"],
+                                               on_complete=_refresh_tray_list),
+                 width=100, height=28, fg=TEAL, hover="#0D9488",
+                 text_color="white").pack(side="right", padx=4)
+            _btn(tray_hdr, "Release CSV",
+                 lambda: self._release_csv_import(on_complete=_refresh_tray_list),
+                 width=110, height=28, fg="#7C3AED", hover="#6D28D9",
+                 text_color="white").pack(side="right", padx=4)
+            _btn(tray_hdr, "⬇ Release Template", self._release_csv_template,
+                 width=150, height=28, fg=BORDER, hover=CARD2).pack(side="right", padx=(0, 2))
+            delete_btn = ctk.CTkButton(tray_hdr, text="Delete Selected", width=130, height=28,
+                fg_color=BORDER, hover_color=CARD2, text_color=TEXT,
+                corner_radius=6, font=FONT_S, state="disabled", command=_delete_selected)
+            delete_btn.pack(side="right", padx=4)
+            _btn(tray_hdr, "Select All", _select_all_toggle,
+                 width=90, height=28, fg=BORDER, hover=CARD2).pack(side="right", padx=(0, 2))
+            _refresh_tray_list()
+
+        def _build_voc_tab():
+            vt = tabs.tab("VOC Monitor")
+            VOCPanel(vt, incubator_id=fresh["id"]).pack(fill="both", expand=True)
+
+        # Register all tab names first (required before .tab() can be called)
+        for tab_name in ("Inspections", "Batches", "Trays", "VOC Monitor"):
+            tabs.add(tab_name)
+
+        # Map tab name → builder function
+        _tab_builders = {
+            "Inspections": _build_inspections_tab,
+            "Batches":     _build_batches_tab,
+            "Trays":       _build_trays_tab,
+            "VOC Monitor": _build_voc_tab,
+        }
+
+        def _on_tab_change():
+            name = tabs.get()
+            frame._active_tab = name
+            if name not in _tab_built:
+                _tab_built.add(name)
+                _tab_builders[name]()
+
+        tabs.configure(command=_on_tab_change)
+
+        # Restore the previously active tab (or default to Inspections)
+        restore_tab = _prev_tab if _prev_tab in _tab_builders else "Inspections"
+        _tab_built.add(restore_tab)
+        _tab_builders[restore_tab]()
+        if restore_tab != "Inspections":
+            tabs.set(restore_tab)
+        frame._active_tab = restore_tab
 
     def _open_inc_detail_window(self, inc: dict):
         """Open a detail window with VOC Monitor, Inspections, Batches and Trays tabs."""
@@ -1896,6 +2594,286 @@ class IncubationApp(ctk.CTk):
             _btn(tr, "QR", lambda t=tray: QRDialog(self, t, port=self._qr_port),
                  width=50, height=24, fg=BORDER, hover=CARD).pack(side="right", padx=8)
 
+    # ── Shared tray CSV helpers ───────────────────────────────────────────────
+
+    _CSV_HEADERS = ["QR", "Sample", "gals/tray", "Incubator",
+                    "Treatment Label", "Date+Time", "User"]
+
+    def _tray_csv_template(self, default_incubator_name: str = ""):
+        import csv
+        path = filedialog.asksaveasfilename(
+            title="Save CSV Template",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            initialfile="trays_template.csv",
+        )
+        if not path:
+            return
+        example = ["T001", "Sample A", "2.0",
+                   default_incubator_name or "Incubator 1",
+                   "Batch 1", "2026-06-24 09:30", "Jane"]
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows([self._CSV_HEADERS, example])
+        messagebox.showinfo("Template Saved",
+            f"Template saved to:\n{path}\n\n"
+            "Fill in one row per tray, then use 'Import CSV' to load it.\n\n"
+            "Columns:\n"
+            "  QR             — tray identifier (required)\n"
+            "  Sample         — sample name (auto-created if missing)\n"
+            "  gals/tray      — volume in gallons\n"
+            "  Incubator      — incubator name (required when importing from Trays tab)\n"
+            "  Treatment Label— batch / treatment name\n"
+            "  Date+Time      — load date (YYYY-MM-DD or YYYY-MM-DD HH:MM)\n"
+            "  User           — person who loaded the tray",
+            parent=self)
+
+    def _tray_csv_import(self, default_incubator_id: int = None,
+                         on_complete=None):
+        import csv, re
+        path = filedialog.askopenfilename(
+            title="Select Tray CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        samples    = {s["name"]: s["id"] for s in db.get_samples()}
+        batches    = {b["name"]: b["id"] for b in db.get_batches()}
+        _inc_list  = db.get_incubators(include_hidden=True)
+        inc_lookup = {i["name"].strip().lower(): i for i in _inc_list}
+
+        def _find_incubator(raw: str):
+            key = raw.strip().lower()
+            if key in inc_lookup:
+                return inc_lookup[key]
+            num = re.search(r"\d+", key)
+            if num:
+                n = num.group()
+                for k, inc in inc_lookup.items():
+                    if re.search(r"\b" + n + r"\b", k):
+                        return inc
+            return None
+
+        errors   = []
+        imported = 0
+        skipped  = 0
+
+        try:
+            with open(path, newline="", encoding="utf-8-sig") as f:
+                rows = list(csv.DictReader(f))
+        except Exception as exc:
+            messagebox.showerror("Import Error", f"Could not read file:\n{exc}", parent=self)
+            return
+
+        if not rows:
+            messagebox.showwarning("Import", "CSV file is empty.", parent=self)
+            return
+
+        missing_cols = [h for h in self._CSV_HEADERS if h not in rows[0]]
+        if missing_cols:
+            messagebox.showerror("Import Error",
+                f"Missing column(s): {', '.join(missing_cols)}\n\n"
+                "Download the template to see the correct format.", parent=self)
+            return
+
+        for i, row in enumerate(rows, start=2):
+            qr = (row.get("QR") or "").strip()
+            if not qr:
+                errors.append(f"Row {i}: missing QR — skipped")
+                skipped += 1
+                continue
+
+            def _pf(v):
+                try:    return float(str(v).strip()) if v and str(v).strip() else None
+                except: return None
+
+            sample_name    = (row.get("Sample")          or "").strip()
+            inc_name       = (row.get("Incubator")       or "").strip()
+            treatment_name = (row.get("Treatment Label") or "").strip()
+            date_raw       = (row.get("Date+Time")       or "").strip()
+            user           = (row.get("User")            or "").strip()
+
+            if inc_name:
+                matched = _find_incubator(inc_name)
+                if matched:
+                    inc_id = matched["id"]
+                else:
+                    inc_id = default_incubator_id
+                    errors.append(
+                        f"Row {i} ({qr}): incubator '{inc_name}' not recognised"
+                        + (f" — assigned to default incubator instead" if inc_id else " — skipped (no default incubator)")
+                        + f". Available: {', '.join(x['name'] for x in _inc_list)}"
+                    )
+                    if inc_id is None:
+                        skipped += 1
+                        continue
+            elif default_incubator_id:
+                inc_id = default_incubator_id
+            else:
+                errors.append(f"Row {i} ({qr}): Incubator column is empty and no default — skipped")
+                skipped += 1
+                continue
+
+            sample_id = samples.get(sample_name)
+            if sample_name and sample_id is None:
+                sample_id = db.upsert_sample({"name": sample_name})
+                samples[sample_name] = sample_id
+                errors.append(f"Row {i} ({qr}): created new sample '{sample_name}'")
+
+            batch_id = batches.get(treatment_name)
+            if treatment_name and batch_id is None:
+                errors.append(f"Row {i} ({qr}): treatment '{treatment_name}' not found — imported without batch link")
+
+            in_date = date_raw[:10] if date_raw and len(date_raw) >= 10 else (date_raw or None)
+
+            try:
+                db.upsert_tray({
+                    "tray_number":         qr,
+                    "incubator_id":        inc_id,
+                    "sample_id":           sample_id,
+                    "incubation_batch_id": batch_id,
+                    "volume_gal":          _pf(row.get("gals/tray")),
+                    "in_date":             in_date,
+                    "status":              "active",
+                    "notes":               f"Loaded by: {user}" if user else "",
+                    "weight_lbs":          None,
+                    "live_count":          None,
+                    "parasite_level_pct":  None,
+                    "out_date":            None,
+                })
+                imported += 1
+            except Exception as exc:
+                errors.append(f"Row {i} ({qr}): {exc}")
+                skipped += 1
+
+        if on_complete:
+            on_complete()
+
+        summary = f"Imported {imported} tray(s)."
+        if skipped:
+            summary += f"\n{skipped} row(s) skipped."
+        if errors:
+            new_samples = [e for e in errors if "created new sample" in e]
+            warnings    = [e for e in errors if "created new sample" not in e]
+            if new_samples:
+                summary += f"\n\nNew samples created ({len(new_samples)}):\n"
+                summary += "\n".join(e.split("'")[1] for e in new_samples[:10])
+            if warnings:
+                summary += "\n\nWarnings / Errors:\n" + "\n".join(warnings[:15])
+                if len(warnings) > 15:
+                    summary += f"\n… and {len(warnings) - 15} more"
+        messagebox.showinfo("Import Complete", summary, parent=self)
+
+    _RELEASE_CSV_HEADERS = ["Tray ID #", "Field", "Gals in Tray",
+                            "LatLong", "Lat", "Long", "Date+Time", "User"]
+
+    def _release_csv_template(self):
+        import csv
+        path = filedialog.asksaveasfilename(
+            title="Save Release CSV Template",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            initialfile="tray_release_template.csv",
+        )
+        if not path:
+            return
+        example = ["T001", "North Field", "2.0",
+                   "44.123,-93.456", "44.123", "-93.456",
+                   "2026-06-24 09:30", "Jane"]
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows([self._RELEASE_CSV_HEADERS, example])
+        messagebox.showinfo("Template Saved",
+            f"Template saved to:\n{path}\n\n"
+            "Fill in one row per tray released to the field.\n\n"
+            "Columns:\n"
+            "  Tray ID #   — tray identifier used to look up the tray (required)\n"
+            "  Field       — field or site name\n"
+            "  Gals in Tray— volume at release (optional, for record)\n"
+            "  LatLong     — combined lat/long string\n"
+            "  Lat / Long  — individual coordinates\n"
+            "  Date+Time   — release date (YYYY-MM-DD or YYYY-MM-DD HH:MM)\n"
+            "  User        — person who released the tray",
+            parent=self)
+
+    def _release_csv_import(self, on_complete=None):
+        import csv
+        path = filedialog.askopenfilename(
+            title="Select Release CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, newline="", encoding="utf-8-sig") as f:
+                rows = list(csv.DictReader(f))
+        except Exception as exc:
+            messagebox.showerror("Import Error", f"Could not read file:\n{exc}", parent=self)
+            return
+
+        if not rows:
+            messagebox.showwarning("Release Import", "CSV file is empty.", parent=self)
+            return
+
+        missing = [h for h in self._RELEASE_CSV_HEADERS if h not in rows[0]]
+        if missing:
+            messagebox.showerror("Import Error",
+                f"Missing column(s): {', '.join(missing)}\n\n"
+                "Download the release template to see the correct format.", parent=self)
+            return
+
+        released = 0
+        not_found = []
+        errors = []
+
+        for i, row in enumerate(rows, start=2):
+            tray_id = (row.get("Tray ID #") or "").strip()
+            if not tray_id:
+                errors.append(f"Row {i}: missing Tray ID # — skipped")
+                continue
+
+            field    = (row.get("Field")       or "").strip()
+            latlong  = (row.get("LatLong")     or "").strip()
+            lat      = (row.get("Lat")         or "").strip()
+            lon      = (row.get("Long")        or "").strip()
+            date_raw = (row.get("Date+Time")   or "").strip()
+            user     = (row.get("User")        or "").strip()
+
+            out_date = date_raw[:10] if date_raw and len(date_raw) >= 10 else (date_raw or None)
+
+            note_parts = []
+            if user:
+                note_parts.append(f"Released by: {user}")
+            if field:
+                note_parts.append(f"Field: {field}")
+            if latlong:
+                note_parts.append(f"LatLong: {latlong}")
+            elif lat or lon:
+                note_parts.append(f"Lat: {lat}  Long: {lon}")
+            notes_append = "\n".join(note_parts)
+
+            try:
+                ok = db.release_tray(tray_id, out_date=out_date, notes_append=notes_append)
+                if ok:
+                    released += 1
+                else:
+                    not_found.append(tray_id)
+            except Exception as exc:
+                errors.append(f"Row {i} ({tray_id}): {exc}")
+
+        if on_complete:
+            on_complete()
+
+        summary = f"Released {released} tray(s)."
+        if not_found:
+            summary += f"\n\n{len(not_found)} tray(s) not found in the system:\n"
+            summary += "\n".join(not_found[:20])
+            if len(not_found) > 20:
+                summary += f"\n… and {len(not_found) - 20} more"
+        if errors:
+            summary += "\n\nErrors:\n" + "\n".join(errors[:10])
+        messagebox.showinfo("Release Import Complete", summary, parent=self)
+
     def _open_batch_dialog(self, batch: dict = None, incubator_id: int = None):
         BatchDialog(self, batch, incubator_id,
                     on_save=lambda: self._refresh_current())
@@ -1906,6 +2884,91 @@ class IncubationApp(ctk.CTk):
     def _open_tray_dialog(self, tray: dict = None, incubator_id: int = None):
         TrayDialog(self, tray, incubator_id,
                    on_save=lambda: self._refresh_current())
+
+    def _bulk_set_status(self):
+        """Change status on all currently selected trays in the Trays tab."""
+        sel = self._tray_tree.selection()
+        if not sel:
+            messagebox.showinfo("Set Status",
+                "Select one or more trays first.\n\n"
+                "Tip: click a row, then Ctrl+click or Shift+click to select more.",
+                parent=self)
+            return
+
+        new_status = self._bulk_status.get()
+        tray_ids   = [int(iid) for iid in sel]
+
+        out_date           = None
+        overwrite_out_date = False
+        if new_status in ("released", "removed"):
+            # Let the user choose the out date (blank = today)
+            today = datetime.now().strftime("%Y-%m-%d")
+            dlg = ctk.CTkInputDialog(
+                title="Out Date",
+                text=f"Out date for {len(tray_ids)} tray(s), format YYYY-MM-DD.\n\n"
+                     f"• Leave blank to use today ({today})\n"
+                     "• Enter a date to apply it to all selected trays")
+            raw = dlg.get_input()
+            if raw is None:
+                return  # cancelled
+            raw = raw.strip()
+            if raw:
+                try:
+                    datetime.strptime(raw, "%Y-%m-%d")
+                except ValueError:
+                    messagebox.showerror("Invalid Date",
+                        f"'{raw}' is not a valid date. Use YYYY-MM-DD.", parent=self)
+                    return
+                out_date           = raw
+                overwrite_out_date = True   # explicit date applies to all selected
+            else:
+                out_date = today  # blank → today, applied to trays without a date
+        else:
+            if not messagebox.askyesno(
+                "Change Status",
+                f"Set status to '{new_status}' for {len(tray_ids)} selected tray(s)?",
+                parent=self):
+                return
+
+        db.set_trays_status(tray_ids, new_status,
+                            out_date=out_date, overwrite_out_date=overwrite_out_date)
+        self._refresh_trays()
+        self._refresh_alert_badge()
+        messagebox.showinfo("Status Updated",
+            f"Updated {len(tray_ids)} tray(s) to '{new_status}'"
+            + (f" with out date {out_date}." if out_date else "."), parent=self)
+
+    def _delete_all_trays(self):
+        """Delete every tray, behind a two-step confirmation."""
+        total = db.get_tray_stats()["count"]
+        if not total:
+            messagebox.showinfo("Delete All Trays", "There are no trays to delete.", parent=self)
+            return
+
+        # Step 1 — initial warning
+        if not messagebox.askyesno(
+            "Delete ALL Trays?",
+            f"This will permanently delete ALL {total} tray(s) from every incubator, "
+            "including their full season history.\n\n"
+            "This cannot be undone.\n\nContinue?",
+            icon="warning", parent=self):
+            return
+
+        # Step 2 — type-to-confirm
+        dlg = ctk.CTkInputDialog(
+            title="Confirm Delete All",
+            text=f"Final confirmation.\n\nType  DELETE  to permanently remove "
+                 f"all {total} tray(s):")
+        entry = (dlg.get_input() or "").strip()
+        if entry != "DELETE":
+            messagebox.showinfo("Cancelled",
+                "Trays were NOT deleted (confirmation text did not match).", parent=self)
+            return
+
+        removed = db.delete_all_trays()
+        self._refresh_current()
+        messagebox.showinfo("Trays Deleted",
+            f"Deleted {removed} tray(s). The tray list is now empty.", parent=self)
 
     def _delete_incubator(self, iid: int):
         if messagebox.askyesno("Delete", "Delete this incubator?"):
@@ -2132,10 +3195,40 @@ class IncubationApp(ctk.CTk):
         # Refresh UI on main thread
         self.after(0, self._on_reading_ui_refresh)
 
+    def _update_dashboard_readings(self):
+        """Update only the sensor labels on each card — no rebuild, no shutter."""
+        unit = db.get_setting("temp_unit", "C")
+        for inc_id, widgets in self._card_widgets.items():
+            reading = self._govee.get_last(inc_id)
+            if not reading:
+                db_row  = db.get_latest_reading(inc_id)
+                reading = {"temp_c": db_row["temperature_c"], "humidity": db_row["humidity_pct"],
+                           "timestamp": db_row["timestamp"]} if db_row else {}
+            temp_c = reading.get("temp_c")
+            hum    = reading.get("humidity")
+            inc    = widgets.get("inc")
+            t_min, t_max = calc.get_temp_range(inc)
+            _poll_txt, _poll_col = _poll_age(reading.get("timestamp"))
+            if temp_c is not None:
+                t_str = calc.format_temp(temp_c, unit)
+                t_col = SUBTEXT if t_min is None else (GREEN if t_min <= temp_c <= t_max else RED)
+                h_col = TEXT
+                dot   = RED if calc.check_temp_humidity(inc, temp_c, hum) else GREEN
+            else:
+                t_str = "—"
+                t_col = h_col = dot = SUBTEXT
+            try:
+                widgets["temp"].configure(text=t_str, text_color=t_col)
+                widgets["hum"].configure(text=f"{hum:.0f}%" if hum is not None else "—", text_color=h_col)
+                widgets["dot"].configure(text_color=dot)
+                widgets["ts"].configure(text=f"Last polled: {_poll_txt}", text_color=_poll_col)
+            except Exception:
+                pass  # widget may have been destroyed by a full refresh
+
     def _on_reading_ui_refresh(self):
         self._refresh_alert_badge()
         if self._current_view == "dashboard":
-            self._refresh_dashboard()
+            self._update_dashboard_readings()
 
     def _start_qr_server(self):
         if db.get_setting("qr_server_enabled", "1") != "1":

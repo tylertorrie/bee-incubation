@@ -100,10 +100,9 @@ class GoveeClient:
         if not self.api_key:
             return []
         try:
-            resp = requests.post(
+            resp = requests.get(
                 f"{_V2_BASE}/user/devices",
                 headers=self._headers(),
-                json={"requestId": self._req_id(), "payload": {}},
                 timeout=REQUEST_TIMEOUT,
             )
             if resp.status_code == 200:
@@ -310,6 +309,8 @@ class GoveeClient:
                     temp_c, humidity = self.poll_incubator(inc)
                     if temp_c is not None and humidity is not None:
                         self.connected = True
+                        if temp_c > 50:  # sensor reports °F — convert to °C
+                            temp_c = round((temp_c - 32) * 5 / 9, 2)
                         self._last[inc["id"]] = {
                             "temp_c":    temp_c,
                             "humidity":  humidity,
