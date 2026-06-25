@@ -1189,16 +1189,21 @@ class IncubationApp(ctk.CTk):
             brow = ctk.CTkFrame(card, fg_color="transparent")
             brow.pack(fill="x", padx=12, pady=(2, 10))
             _label(brow, "Inspections:", FONT_S, SUBTEXT).pack(side="left", padx=(2, 6))
-            make_status_badges(brow, inc["id"]).pack(side="left")
+            make_status_badges(
+                brow, inc["id"],
+                on_click=lambda p, i=inc: self._open_inspection_form(i)).pack(side="left")
         else:
             # Hidden cards just need bottom padding
             ctk.CTkFrame(card, fg_color="transparent", height=6).pack()
 
-        # Whole card is clickable — navigates to detail
+        # Whole card is clickable — navigates to detail.
+        # Buttons (e.g. inspection pills) keep their own command and are skipped.
         def _go_detail(event, i=inc):
             self._show_inc_detail(i)
 
         def _bind_recursive(widget):
+            if isinstance(widget, ctk.CTkButton):
+                return
             widget.bind("<Button-1>", _go_detail)
             for child in widget.winfo_children():
                 _bind_recursive(child)
@@ -2234,6 +2239,12 @@ class IncubationApp(ctk.CTk):
                 font=("Segoe UI", 13, "bold"), text_color=TEXT,
                 fg_color=CARD, corner_radius=6, padx=10, height=32,
             ).pack(side="left", padx=4, pady=8)
+
+        # Inspection pills (click to open the inspection report)
+        make_status_badges(
+            topbar, fresh["id"],
+            on_click=lambda p, i=fresh: self._open_inspection_form(i)).pack(
+            side="left", padx=12, pady=8)
 
         _btn(topbar, "Inspect Now", lambda i=fresh: self._open_inspection_form(i),
              width=110, height=32, fg=BLUE, hover="#1D4ED8",

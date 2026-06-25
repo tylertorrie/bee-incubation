@@ -73,25 +73,42 @@ def _check(parent, text: str, initial: bool = False) -> ctk.CTkCheckBox:
 
 # ── Public badge helper ───────────────────────────────────────────────────────
 
-def make_status_badges(parent, incubator_id: int) -> ctk.CTkFrame:
+def make_status_badges(parent, incubator_id: int, on_click=None) -> ctk.CTkFrame:
     """
-    Return a small frame containing coloured M and E chips.
+    Return a small frame with Morning / Evening inspection pills.
+
     Colours:
-      green  ✓  — inspected today within the window
-      red    ✗  — window closed, not inspected (missed)
-      amber  !  — window is currently open
-      grey   ·  — window hasn't opened yet today
+      green ✓  — that inspection has been done today
+      red   •  — not done yet (default)
+
+    If `on_click` is given, the pills become buttons; clicking one calls
+    on_click(period) where period is "morning" or "evening".
     """
     status = idb.get_inspection_status(incubator_id)
     row    = ctk.CTkFrame(parent, fg_color="transparent")
-    for period, abbr in (("morning", "M"), ("evening", "E")):
-        st     = status[period]
-        bg, fg, sym = BADGE_STYLE.get(st, BADGE_STYLE["pending"])
-        ctk.CTkLabel(row,
-                     text=f" {abbr}{sym} ",
-                     fg_color=bg, text_color=fg,
-                     corner_radius=4, font=FONT_XS,
-                     width=32, height=20).pack(side="left", padx=2)
+    pill_font = ("Segoe UI", 11, "bold")
+
+    for period, label, icon in (("morning", "AM", "🌅"), ("evening", "PM", "🌙")):
+        done = status.get(period) == "done"
+        bg   = "#15803D" if done else "#B91C1C"      # green / red
+        hov  = "#16A34A" if done else "#DC2626"
+        fg   = "#FFFFFF"
+        sym  = "✓" if done else "•"
+        text = f"{icon} {label} {sym}"
+
+        if on_click:
+            ctk.CTkButton(
+                row, text=text, width=70, height=28,
+                fg_color=bg, hover_color=hov, text_color=fg,
+                corner_radius=14, font=pill_font,
+                command=lambda p=period: on_click(p),
+            ).pack(side="left", padx=3)
+        else:
+            ctk.CTkLabel(
+                row, text=text, width=70, height=28,
+                fg_color=bg, text_color=fg,
+                corner_radius=14, font=pill_font,
+            ).pack(side="left", padx=3)
     return row
 
 
