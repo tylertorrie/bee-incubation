@@ -647,8 +647,12 @@ def _trays_home_body(notfound: str = None) -> str:
         parts.append('<div class="card"><div class="meta" style="color:#EF4444">'
                      f'No tray found for “{notfound}”.</div></div>')
     parts.append(
+        '<a class="ibtn" style="background:#7C3AED;margin:0 0 14px;padding:14px;'
+        'font-size:1.05rem" href="/m/scan">📷  Scan a tray QR code</a>'
+    )
+    parts.append(
         '<form method="GET" action="/m/tray-lookup" class="fld" style="margin-bottom:16px">'
-        '<label>Find a tray by number</label>'
+        '<label>Or find a tray by number</label>'
         '<div style="display:flex;gap:8px">'
         '<input type="text" name="q" placeholder="e.g. Tray0123" '
         'autocapitalize="characters" autocomplete="off" style="flex:1">'
@@ -668,6 +672,66 @@ def _trays_home_body(notfound: str = None) -> str:
         )
     parts.append('</div>')
     return "".join(parts)
+
+
+_SCAN_BODY = """
+<div class="topbar"><h1>📷 Scan Tray</h1>
+<a href="/m/trays" style="color:#9CA3AF;text-decoration:none;font-size:.9rem">‹ Back</a></div>
+<div class="wrap">
+  <div id="fallback" class="card" style="display:none">
+    <div class="meta" style="color:#FBBF24;font-size:.95rem;line-height:1.5">
+      📷 In-app scanning needs a secure (HTTPS) connection, which isn't set up yet.
+      <br><br>
+      For now you can:<br>
+      • Use your phone's <b>built-in camera app</b> to scan the tray's QR code — it opens the tray directly.<br>
+      • Or go back and <b>search by tray number</b>.
+    </div>
+    <a class="ibtn" href="/m/trays">‹ Back to Trays</a>
+  </div>
+  <div id="scanwrap" style="display:none">
+    <div class="card" style="padding:10px">
+      <div id="reader" style="width:100%"></div>
+    </div>
+    <div class="meta" id="scanmsg" style="text-align:center">Point the camera at a tray QR code…</div>
+  </div>
+</div>
+<script>
+(function(){
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    document.getElementById('fallback').style.display = 'block';
+    return;
+  }
+  document.getElementById('scanwrap').style.display = 'block';
+  var s = document.createElement('script');
+  s.src = 'https://unpkg.com/html5-qrcode';
+  s.onload = function(){
+    var qr = new Html5Qrcode("reader");
+    var done = false;
+    function onScan(text){
+      if (done) return;
+      var m = text.match(/\\/tray\\/(\\d+)/);
+      if (m){
+        done = true;
+        document.getElementById('scanmsg').textContent = 'Found tray — opening…';
+        qr.stop().then(function(){ window.location = '/tray/' + m[1]; })
+                  .catch(function(){ window.location = '/tray/' + m[1]; });
+      } else {
+        document.getElementById('scanmsg').textContent = 'That QR is not a tray code.';
+      }
+    }
+    qr.start({facingMode:"environment"}, {fps:10, qrbox:240}, onScan, function(){})
+      .catch(function(e){
+        document.getElementById('scanmsg').textContent = 'Could not start camera: ' + e;
+      });
+  };
+  s.onerror = function(){
+    document.getElementById('scanmsg').textContent =
+      'Could not load the scanner (no internet?). Use your phone camera app or search instead.';
+  };
+  document.body.appendChild(s);
+})();
+</script>
+"""
 
 
 def _incubator_trays_body(inc_id: int) -> str:
@@ -860,6 +924,10 @@ def _make_flask_app():
     def mobile_incubator_trays(inc_id):
         return _mobile_page("Trays", _incubator_trays_body(inc_id),
                             active="trays")
+
+    @app.route("/m/scan")
+    def mobile_scan():
+        return _mobile_page("Scan Tray", _SCAN_BODY, active="trays")
 
     @app.route("/m/tray-lookup")
     def mobile_tray_lookup():
