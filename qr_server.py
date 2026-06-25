@@ -157,9 +157,16 @@ body{background:#0F172A;color:#F3F4F6;font-family:system-ui,-apple-system,sans-s
 .gv{font-size:.9rem;color:#9CA3AF;margin-top:6px}
 .fld{margin-bottom:14px}
 .fld label{display:block;color:#9CA3AF;font-size:.82rem;margin-bottom:6px}
-.fld input[type=number],.fld textarea{width:100%;background:#374151;
+.fld input[type=number],.fld input[type=text],.fld input[type=search],.fld textarea{
+        width:100%;background:#374151;
         border:1px solid #4b5563;border-radius:8px;color:#F3F4F6;padding:12px;font-size:1.05rem}
 .fld input:focus,.fld textarea:focus{outline:2px solid #FBBF24;border-color:#FBBF24}
+.trow{display:flex;justify-content:space-between;align-items:center;background:#1F2937;
+      border:1px solid #263347;border-radius:10px;padding:12px;margin-bottom:8px;
+      text-decoration:none;color:inherit}
+.trow .tn{font-weight:700;color:#F3F4F6}
+.trow .ts{font-size:.8rem;color:#9CA3AF;margin-top:2px}
+.trow .tg{color:#FBBF24;font-weight:700;white-space:nowrap;margin-left:10px}
 .fld textarea{min-height:72px;resize:vertical}
 .chk{display:flex;align-items:center;justify-content:space-between;padding:12px;
      background:#263347;border-radius:10px;margin-bottom:8px}
@@ -633,6 +640,86 @@ def _update_mobile_inspection(insp_id: int, form) -> Optional[int]:
     return existing.get("incubator_id")
 
 
+def _trays_home_body(notfound: str = None) -> str:
+    """Trays home: search box + per-incubator active-tray summary cards."""
+    parts = ['<div class="topbar"><h1>📦 Trays</h1></div><div class="wrap">']
+    if notfound:
+        parts.append('<div class="card"><div class="meta" style="color:#EF4444">'
+                     f'No tray found for “{notfound}”.</div></div>')
+    parts.append(
+        '<form method="GET" action="/m/tray-lookup" class="fld" style="margin-bottom:16px">'
+        '<label>Find a tray by number</label>'
+        '<div style="display:flex;gap:8px">'
+        '<input type="text" name="q" placeholder="e.g. Tray0123" '
+        'autocapitalize="characters" autocomplete="off" style="flex:1">'
+        '<button class="savebtn" style="width:auto;margin-top:0;padding:12px 18px" '
+        'type="submit">Go</button>'
+        '</div></form>'
+    )
+    for inc in db.get_incubators():
+        st = db.get_tray_stats(incubator_id=inc["id"], status="active")
+        parts.append(
+            f'<a href="/m/trays/{inc["id"]}" style="text-decoration:none;color:inherit">'
+            '<div class="card">'
+            f'<div class="cn">{inc["name"]}</div>'
+            f'<div class="meta" style="margin-top:6px">📦 {st["count"]} active trays '
+            f'· {st["total_gals"]:.1f} gal — tap to view ›</div>'
+            '</div></a>'
+        )
+    parts.append('</div>')
+    return "".join(parts)
+
+
+def _incubator_trays_body(inc_id: int) -> str:
+    """Active trays in one incubator, with a live filter box."""
+    inc = next((i for i in db.get_incubators(include_hidden=True)
+                if i["id"] == inc_id), None)
+    if not inc:
+        return ('<div class="topbar"><h1>Trays</h1></div><div class="wrap">'
+                '<div class="card"><div class="soon">Incubator not found.</div>'
+                '</div></div>')
+
+    trays = db.get_trays(incubator_id=inc_id, status="active")
+    parts = [
+        '<div class="topbar">'
+        f'<h1>📦 {inc["name"]}</h1>'
+        '<a href="/m/trays" style="color:#9CA3AF;text-decoration:none;font-size:.9rem">‹ Back</a>'
+        '</div><div class="wrap">'
+        '<div class="fld" style="margin-bottom:12px">'
+        '<input type="search" id="q" placeholder="Filter by tray # or sample…" '
+        'autocomplete="off" oninput="filt()"></div>'
+        f'<div class="meta" id="cnt" style="margin:0 4px 10px">{len(trays)} active trays</div>'
+        '<div id="list">'
+    ]
+    if trays:
+        for t in trays:
+            tn  = t.get("tray_number") or "—"
+            sm  = t.get("sample_name") or "—"
+            vol = t.get("volume_gal")
+            vtxt = f"{vol:.1f} gal" if vol is not None else "—"
+            key = (str(tn) + " " + str(sm)).lower().replace('"', "")
+            parts.append(
+                f'<a class="trow" href="/tray/{t["id"]}" data-s="{key}">'
+                f'<div><div class="tn">{tn}</div><div class="ts">{sm}</div></div>'
+                f'<div class="tg">{vtxt}</div></a>'
+            )
+    else:
+        parts.append('<div class="card"><div class="soon">No active trays.</div></div>')
+    parts.append('</div></div>')
+    parts.append(
+        '<script>'
+        'function filt(){'
+        'var q=document.getElementById("q").value.toLowerCase();'
+        'var n=0;'
+        'document.querySelectorAll(".trow").forEach(function(e){'
+        'var m=e.dataset.s.indexOf(q)>=0;e.style.display=m?"":"none";if(m)n++;});'
+        'document.getElementById("cnt").textContent=n+" active trays";'
+        '}'
+        '</script>'
+    )
+    return "".join(parts)
+
+
 # ── Flask app ─────────────────────────────────────────────────────────────────
 
 _flask_app: Optional[object] = None
@@ -765,11 +852,26 @@ def _make_flask_app():
 
     @app.route("/m/trays")
     def mobile_trays():
-        body = ('<div class="topbar"><h1>📦 Trays</h1></div>'
-                '<div class="wrap"><div class="card">'
-                '<div class="soon">Coming in the next update.</div>'
-                '</div></div>')
-        return _mobile_page("Trays", body, active="trays")
+        notfound = request.args.get("notfound")
+        return _mobile_page("Trays", _trays_home_body(notfound=notfound),
+                            active="trays")
+
+    @app.route("/m/trays/<int:inc_id>")
+    def mobile_incubator_trays(inc_id):
+        return _mobile_page("Trays", _incubator_trays_body(inc_id),
+                            active="trays")
+
+    @app.route("/m/tray-lookup")
+    def mobile_tray_lookup():
+        from flask import redirect
+        from urllib.parse import quote
+        q = (request.args.get("q") or "").strip()
+        if not q:
+            return redirect("/m/trays")
+        tray = db.get_tray_by_number(q)
+        if tray:
+            return redirect(f"/tray/{tray['id']}")
+        return redirect(f"/m/trays?notfound={quote(q)}")
 
     # ── VOC / ESP32 endpoints ─────────────────────────────────────────────────
     # ESP32 posts here every N minutes:
