@@ -1723,6 +1723,15 @@ class IncubationApp(ctk.CTk):
         self._qr_ip_lbl = _label(qf, "", FONT_S, BLUE)
         self._qr_ip_lbl.grid(row=2, column=1, sticky="w", padx=4, pady=2)
 
+        # Mobile app section
+        mf = section("Mobile App")
+        self._set["mobile_passcode"] = _FormRow(
+            mf, 0, "Shared passcode", "", 200)
+        _label(mf, "Set a passcode before sharing the app online (Tailscale).\n"
+                   "Leave blank to disable the login (local network only).",
+               FONT_S, SUBTEXT).grid(row=1, column=0, columnspan=2,
+                                     sticky="w", padx=4, pady=(2, 4))
+
         # ── Data Storage ──────────────────────────────────────────────────────
         dsf = ctk.CTkFrame(scroll, fg_color=CARD, corner_radius=10)
         dsf.pack(fill="x", padx=4, pady=(8, 2))
@@ -1811,7 +1820,7 @@ class IncubationApp(ctk.CTk):
     def _refresh_settings(self):
         keys = ["govee_api_key", "date_alert_lookahead",
                 "temp_unit", "lbs_per_gal", "target_gals_per_tray",
-                "qr_server_port", "qr_server_enabled",
+                "qr_server_port", "qr_server_enabled", "mobile_passcode",
                 "smtp_host", "smtp_port", "smtp_tls",
                 "smtp_username", "smtp_password", "smtp_from"]
         for k in keys:
@@ -1828,7 +1837,7 @@ class IncubationApp(ctk.CTk):
     def _save_settings(self):
         keys = ["govee_api_key", "date_alert_lookahead",
                 "temp_unit", "lbs_per_gal", "target_gals_per_tray",
-                "qr_server_port", "qr_server_enabled",
+                "qr_server_port", "qr_server_enabled", "mobile_passcode",
                 "smtp_host", "smtp_port", "smtp_tls",
                 "smtp_username", "smtp_password", "smtp_from"]
         for k in keys:

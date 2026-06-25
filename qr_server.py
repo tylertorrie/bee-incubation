@@ -16,7 +16,8 @@ import threading
 from typing import Callable, Optional
 
 try:
-    from flask import Flask, request, jsonify, render_template_string
+    from flask import (Flask, request, jsonify, render_template_string,
+                       session, redirect)
     HAS_FLASK = True
 except ImportError:
     HAS_FLASK = False
@@ -784,6 +785,49 @@ def _incubator_trays_body(inc_id: int) -> str:
     return "".join(parts)
 
 
+# ── Auth (shared passcode) ────────────────────────────────────────────────────
+
+# Paths reachable without logging in (login page, health, machine/ESP32 endpoints)
+_AUTH_EXEMPT = ("/m/login", "/health", "/reading", "/api/readings", "/api/status")
+
+# Simple in-memory brute-force throttle: ip -> [fail_count, locked_until_ts]
+_auth_fails: dict = {}
+
+
+def _passcode() -> str:
+    """The shared mobile passcode, or '' if auth is disabled."""
+    return (db.get_setting("mobile_passcode", "") or "").strip()
+
+
+def _flask_secret() -> str:
+    """Persistent secret for signing session cookies (so logins survive restarts)."""
+    sec = db.get_setting("flask_secret", "")
+    if not sec:
+        import secrets
+        sec = secrets.token_hex(32)
+        db.set_setting("flask_secret", sec)
+    return sec
+
+
+def _login_body(error: str = "") -> str:
+    err_html = (f'<div class="meta" style="color:#EF4444;margin-bottom:10px">{error}</div>'
+                if error else '')
+    return (
+        '<div class="topbar"><h1>🐝 Bee Incubation</h1></div>'
+        '<div class="wrap" style="padding-top:40px">'
+        '<div class="card">'
+        '<div class="cn" style="margin-bottom:12px">Enter passcode</div>'
+        + err_html +
+        '<form method="POST" action="/m/login">'
+        '<div class="fld">'
+        '<input type="password" name="passcode" placeholder="Passcode" '
+        'autocomplete="current-password" autofocus></div>'
+        '<button class="savebtn" type="submit">Unlock</button>'
+        '</form>'
+        '</div></div>'
+    )
+
+
 # ── Flask app ─────────────────────────────────────────────────────────────────
 
 _flask_app: Optional[object] = None
@@ -792,12 +836,63 @@ _running = False
 
 
 def _make_flask_app():
+    from datetime import timedelta
     app = Flask(__name__)
     app.logger.disabled = True
+    app.secret_key = _flask_secret()
+    app.permanent_session_lifetime = timedelta(days=30)
 
     import logging
     log = logging.getLogger("werkzeug")
     log.setLevel(logging.ERROR)
+
+    # ── Auth gate (active only when a passcode is set) ─────────────────────────
+    @app.before_request
+    def _require_passcode():
+        code = _passcode()
+        if not code:
+            return  # auth disabled — open on LAN as before
+        p = request.path or "/"
+        if p == "/m/login" or any(p == e or p.startswith(e) for e in _AUTH_EXEMPT):
+            return
+        if session.get("authed"):
+            return
+        if p.startswith("/api/"):
+            return jsonify({"error": "auth required"}), 401
+        return redirect("/m/login")
+
+    @app.route("/m/login", methods=["GET", "POST"])
+    def mobile_login():
+        import time
+        ip   = request.remote_addr or "?"
+        now  = time.time()
+        fails, locked_until = _auth_fails.get(ip, [0, 0])
+
+        if request.method == "POST":
+            if now < locked_until:
+                return _mobile_page("Login",
+                    _login_body("Too many attempts — wait a minute and try again."),
+                    active="home")
+            entered = (request.form.get("passcode") or "").strip()
+            if entered and entered == _passcode():
+                session.permanent = True
+                session["authed"] = True
+                _auth_fails.pop(ip, None)
+                return redirect("/")
+            fails += 1
+            locked_until = now + 60 if fails >= 5 else 0
+            _auth_fails[ip] = [fails, locked_until]
+            return _mobile_page("Login",
+                _login_body("Incorrect passcode."), active="home")
+
+        if session.get("authed"):
+            return redirect("/")
+        return _mobile_page("Login", _login_body(), active="home")
+
+    @app.route("/m/logout")
+    def mobile_logout():
+        session.clear()
+        return redirect("/m/login")
 
     @app.route("/tray/<int:tray_id>")
     def tray_page(tray_id):
