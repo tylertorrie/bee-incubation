@@ -286,43 +286,63 @@ def _dashboard_data() -> dict:
     return {"incubators": incs, "unit": unit}
 
 
-_DASHBOARD_BODY = """
-<div class="topbar"><h1>🐝 Incubators</h1><span class="upd" id="upd"></span></div>
-<div class="wrap"><div id="cards"><div class="loading">Loading…</div></div></div>
-<script>
-async function load(){
-  try{
-    const r = await fetch('/api/dashboard', {cache:'no-store'});
-    const d = await r.json();
-    const c = document.getElementById('cards');
-    if(!d.incubators.length){ c.innerHTML = '<div class="loading">No incubators.</div>'; return; }
-    c.innerHTML = '';
-    d.incubators.forEach(function(i){
-      const card = document.createElement('div');
-      card.className = 'card';
-      card.innerHTML =
-        '<div class="cn">'+i.name+'</div>'+
-        '<div class="metrics">'+
-          '<div class="metric"><div class="ml">Temp</div><div class="mv" style="color:'+i.temp_color+'">'+i.temp+'</div></div>'+
-          '<div class="metric"><div class="ml">Humidity</div><div class="mv">'+i.humidity+'</div></div>'+
-        '</div>'+
-        '<div class="meta" style="color:'+i.poll_color+'">● Last polled: '+i.last_polled+'</div>'+
-        '<div class="meta">'+i.trays+' / '+i.capacity+' trays</div>'+
-        '<div class="pills">'+
-          '<span class="pill '+(i.morning_done?'g':'r')+'">🌅 AM '+(i.morning_done?'✓':'•')+'</span>'+
-          '<span class="pill '+(i.evening_done?'g':'r')+'">🌙 PM '+(i.evening_done?'✓':'•')+'</span>'+
-        '</div>';
-      c.appendChild(card);
-    });
-    document.getElementById('upd').textContent = 'Updated ' + new Date().toLocaleTimeString();
-  }catch(e){
-    document.getElementById('cards').innerHTML = '<div class="loading">Connection lost — retrying…</div>';
-  }
-}
-load();
-setInterval(load, 20000);
-</script>
-"""
+def _dashboard_card_html(i: dict) -> str:
+    return (
+        '<div class="card">'
+        f'<div class="cn">{i["name"]}</div>'
+        '<div class="metrics">'
+        f'<div class="metric"><div class="ml">Temp</div>'
+        f'<div class="mv" style="color:{i["temp_color"]}">{i["temp"]}</div></div>'
+        f'<div class="metric"><div class="ml">Humidity</div>'
+        f'<div class="mv">{i["humidity"]}</div></div>'
+        '</div>'
+        f'<div class="meta" style="color:{i["poll_color"]}">● Last polled: {i["last_polled"]}</div>'
+        f'<div class="meta">{i["trays"]} / {i["capacity"]} trays</div>'
+        '<div class="pills">'
+        f'<span class="pill {"g" if i["morning_done"] else "r"}">🌅 AM {"✓" if i["morning_done"] else "•"}</span>'
+        f'<span class="pill {"g" if i["evening_done"] else "r"}">🌙 PM {"✓" if i["evening_done"] else "•"}</span>'
+        '</div></div>'
+    )
+
+
+def _dashboard_body() -> str:
+    """Server-rendered dashboard (one round trip), then JS refreshes in place."""
+    data  = _dashboard_data()
+    cards = "".join(_dashboard_card_html(i) for i in data["incubators"]) \
+            or '<div class="loading">No incubators.</div>'
+    return (
+        '<div class="topbar"><h1>🐝 Incubators</h1><span class="upd" id="upd"></span></div>'
+        f'<div class="wrap"><div id="cards">{cards}</div></div>'
+        '<script>'
+        'async function load(){'
+        ' try{'
+        '  const r = await fetch("/api/dashboard", {cache:"no-store"});'
+        '  const d = await r.json();'
+        '  const c = document.getElementById("cards");'
+        '  if(!d.incubators.length){ c.innerHTML = "<div class=\\"loading\\">No incubators.</div>"; return; }'
+        '  c.innerHTML = "";'
+        '  d.incubators.forEach(function(i){'
+        '    const card = document.createElement("div"); card.className = "card";'
+        '    card.innerHTML ='
+        '      "<div class=\\"cn\\">"+i.name+"</div>"+'
+        '      "<div class=\\"metrics\\">"+'
+        '        "<div class=\\"metric\\"><div class=\\"ml\\">Temp</div><div class=\\"mv\\" style=\\"color:"+i.temp_color+"\\">"+i.temp+"</div></div>"+'
+        '        "<div class=\\"metric\\"><div class=\\"ml\\">Humidity</div><div class=\\"mv\\">"+i.humidity+"</div></div>"+'
+        '      "</div>"+'
+        '      "<div class=\\"meta\\" style=\\"color:"+i.poll_color+"\\">\\u25CF Last polled: "+i.last_polled+"</div>"+'
+        '      "<div class=\\"meta\\">"+i.trays+" / "+i.capacity+" trays</div>"+'
+        '      "<div class=\\"pills\\">"+'
+        '        "<span class=\\"pill "+(i.morning_done?"g":"r")+"\\">\\uD83C\\uDF05 AM "+(i.morning_done?"\\u2713":"\\u2022")+"</span>"+'
+        '        "<span class=\\"pill "+(i.evening_done?"g":"r")+"\\">\\uD83C\\uDF19 PM "+(i.evening_done?"\\u2713":"\\u2022")+"</span>"+'
+        '      "</div>";'
+        '    c.appendChild(card);'
+        '  });'
+        '  document.getElementById("upd").textContent = "Updated " + new Date().toLocaleTimeString();'
+        ' }catch(e){}'
+        '}'
+        'setInterval(load, 20000);'
+        '</script>'
+    )
 
 
 _PERIOD_LABEL = {
@@ -846,6 +866,30 @@ def _make_flask_app():
     log = logging.getLogger("werkzeug")
     log.setLevel(logging.ERROR)
 
+    # ── gzip responses (big win for large pages over the Funnel relay) ─────────
+    @app.after_request
+    def _gzip(resp):
+        try:
+            if "gzip" not in (request.headers.get("Accept-Encoding") or "").lower():
+                return resp
+            ct = resp.content_type or ""
+            if not (ct.startswith("text/") or "json" in ct or "javascript" in ct):
+                return resp
+            if resp.direct_passthrough:
+                return resp
+            data = resp.get_data()
+            if len(data) < 600:
+                return resp
+            import gzip as _gz
+            comp = _gz.compress(data, 6)
+            resp.set_data(comp)
+            resp.headers["Content-Encoding"] = "gzip"
+            resp.headers["Content-Length"]   = str(len(comp))
+            resp.headers["Vary"]             = "Accept-Encoding"
+        except Exception:
+            pass
+        return resp
+
     # ── Auth gate (active only when a passcode is set) ─────────────────────────
     @app.before_request
     def _require_passcode():
@@ -932,7 +976,7 @@ def _make_flask_app():
     # ── Mobile web app (PWA) ──────────────────────────────────────────────────
     @app.route("/")
     def mobile_home():
-        return _mobile_page("Bee Incubators", _DASHBOARD_BODY, active="home")
+        return _mobile_page("Bee Incubators", _dashboard_body(), active="home")
 
     @app.route("/api/dashboard")
     def mobile_dashboard_data():
