@@ -339,11 +339,65 @@ def _pill_html(label: str, icon: str, done: bool) -> str:
     return f'<span class="pill {cls}">{icon} {label} {sym}</span>'
 
 
+def _inspection_record_html(r: dict) -> str:
+    """Compact card for one completed inspection."""
+    from datetime import datetime
+    period = r.get("period") or "manual"
+    icon   = {"morning": "🌅", "evening": "🌙"}.get(period, "📝")
+    when   = r.get("timestamp") or ""
+    try:
+        when = datetime.fromisoformat(when).strftime("%b %d  %I:%M %p")
+    except Exception:
+        when = when[:16]
+
+    # Temperature line
+    thermo = r.get("thermometer_temp_c")
+    govee  = r.get("govee_temp_c")
+    if thermo is not None:
+        temp_col = "#EF4444" if r.get("temp_alert") else "#F3F4F6"
+        gtxt = f"  (Govee {govee:.1f})" if govee is not None else ""
+        temp_html = (f'<div class="meta" style="color:{temp_col}">'
+                     f'🌡 Thermo {thermo:.1f}°C{gtxt}</div>')
+    else:
+        temp_html = ''
+
+    # Issue flags
+    flags = []
+    if not r.get("heat_pumps_ok"):   flags.append("⚠ Heat pumps")
+    if not r.get("fans_ok"):         flags.append("⚠ Fans")
+    if not r.get("black_lights_ok"): flags.append("⚠ Black lights")
+    if r.get("bees_emerging"):       flags.append("🐝 Bees emerging")
+    if r.get("parasites_emerging"):  flags.append("⚠ Parasites")
+    if r.get("temp_alert"):          flags.append("🌡 Temp alert")
+    flag_html = ''
+    if flags:
+        chips = "".join(
+            f'<span style="display:inline-block;background:#7F1D1D;color:#FEE2E2;'
+            f'border-radius:6px;padding:2px 8px;font-size:.75rem;margin:3px 4px 0 0">{f}</span>'
+            for f in flags)
+        flag_html = f'<div style="margin-top:6px">{chips}</div>'
+
+    notes = (r.get("notes") or "").strip()
+    notes_html = (f'<div class="meta" style="margin-top:6px;color:#CBD5E1">“{notes}”</div>'
+                  if notes else '')
+
+    return (
+        '<div class="card" style="padding:12px">'
+        f'<div style="display:flex;justify-content:space-between;align-items:baseline">'
+        f'<span style="font-weight:700;color:#F3F4F6">{icon} {r.get("incubator_name") or "—"}</span>'
+        f'<span class="meta">{when}</span></div>'
+        + temp_html + flag_html + notes_html +
+        '</div>'
+    )
+
+
 def _inspections_list_body(saved_name: str = None) -> str:
     import inspection_db as idb
     parts = ['<div class="topbar"><h1>🔍 Inspections</h1></div><div class="wrap">']
     if saved_name:
         parts.append(f'<div class="banner">✓ Inspection saved for {saved_name}</div>')
+
+    # Today's status + record buttons
     for inc in db.get_incubators():
         st = idb.get_inspection_status(inc["id"])
         am = st.get("morning") == "done"
@@ -357,6 +411,16 @@ def _inspections_list_body(saved_name: str = None) -> str:
             f'<a class="ibtn" href="/m/inspect/{inc["id"]}">+ Record inspection</a>'
             '</div>'
         )
+
+    # Recent completed inspections
+    recent = idb.get_inspections(limit=25)
+    parts.append('<div class="ml" style="margin:18px 4px 8px">Recent inspections</div>')
+    if recent:
+        for r in recent:
+            parts.append(_inspection_record_html(r))
+    else:
+        parts.append('<div class="card"><div class="soon">No inspections recorded yet.</div></div>')
+
     parts.append('</div>')
     return "".join(parts)
 
