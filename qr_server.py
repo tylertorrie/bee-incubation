@@ -119,6 +119,180 @@ _TRAY_HTML = """<!DOCTYPE html>
 </html>"""
 
 
+# ── Mobile web app (PWA) ──────────────────────────────────────────────────────
+
+_MOBILE_CSS = """
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{background:#0F172A;color:#F3F4F6;font-family:system-ui,-apple-system,sans-serif;
+     padding:0 0 76px 0;min-height:100vh}
+.topbar{position:sticky;top:0;z-index:5;background:#111827;padding:14px 16px;
+        border-bottom:1px solid #1f2937;display:flex;align-items:center;justify-content:space-between}
+.topbar h1{font-size:1.15rem;color:#FFD700}
+.topbar .upd{font-size:.7rem;color:#6B7280}
+.wrap{padding:12px}
+.card{background:#1F2937;border-radius:14px;padding:14px;margin-bottom:12px;
+      border:1px solid #263347}
+.cn{font-size:1.15rem;font-weight:700;color:#FFD700;margin-bottom:10px}
+.metrics{display:flex;gap:10px;margin-bottom:10px}
+.metric{flex:1;background:#263347;border-radius:10px;padding:10px;text-align:center}
+.ml{font-size:.7rem;color:#9CA3AF;text-transform:uppercase;letter-spacing:.04em}
+.mv{font-size:1.6rem;font-weight:800;margin-top:2px}
+.meta{font-size:.85rem;color:#9CA3AF;margin-top:4px}
+.pills{display:flex;gap:8px;margin-top:12px}
+.pill{flex:1;text-align:center;padding:9px 0;border-radius:14px;font-weight:700;
+      font-size:.95rem;color:#fff}
+.pill.g{background:#15803D}
+.pill.r{background:#B91C1C}
+.soon{color:#9CA3AF;text-align:center;padding:30px 10px;font-size:1rem}
+.loading{color:#6B7280;text-align:center;padding:40px}
+.nav{position:fixed;bottom:0;left:0;right:0;background:#111827;border-top:1px solid #1f2937;
+     display:flex;padding:6px 0 calc(6px + env(safe-area-inset-bottom))}
+.nav a{flex:1;text-align:center;color:#6B7280;text-decoration:none;font-size:.72rem;padding:6px 0}
+.nav a .ic{display:block;font-size:1.3rem;margin-bottom:2px}
+.nav a.active{color:#FFD700}
+"""
+
+
+def _nav_html(active: str) -> str:
+    def item(key, href, icon, label):
+        cls = "active" if key == active else ""
+        return f'<a class="{cls}" href="{href}"><span class="ic">{icon}</span>{label}</a>'
+    return ('<div class="nav">'
+            + item("home",    "/",             "🏠", "Dashboard")
+            + item("inspect", "/m/inspections", "🔍", "Inspect")
+            + item("trays",   "/m/trays",       "📦", "Trays")
+            + '</div>')
+
+
+def _mobile_page(title: str, body: str, active: str = "home") -> str:
+    return (
+        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1, viewport-fit=cover'>"
+        "<meta name='apple-mobile-web-app-capable' content='yes'>"
+        "<meta name='mobile-web-app-capable' content='yes'>"
+        "<meta name='theme-color' content='#111827'>"
+        f"<title>{title}</title><style>{_MOBILE_CSS}</style></head>"
+        f"<body>{body}{_nav_html(active)}</body></html>"
+    )
+
+
+def _mobile_poll_age(ts: Optional[str]) -> tuple:
+    """(text, color) for how long ago — colors scaled to the 15-min poll cadence."""
+    from datetime import datetime
+    if not ts:
+        return "Never polled", "#9CA3AF"
+    try:
+        then    = datetime.fromisoformat(ts)
+        minutes = (datetime.now() - then).total_seconds() / 60
+    except Exception:
+        return "Unknown", "#9CA3AF"
+    if minutes < 1:
+        text = "Just now"
+    elif minutes < 60:
+        text = f"{int(minutes)} min ago"
+    elif minutes < 120:
+        text = "1 hr ago"
+    else:
+        text = f"{int(minutes // 60)} hrs ago"
+    cycle = 15  # minutes
+    if minutes <= cycle * 1.5 + 1:
+        color = "#22C55E"
+    elif minutes <= cycle * 3 + 2:
+        color = "#F59E0B"
+    else:
+        color = "#EF4444"
+    return text, color
+
+
+def _dashboard_data() -> dict:
+    """Build the incubator list the mobile dashboard renders."""
+    try:
+        import inspection_db as idb
+    except Exception:
+        idb = None
+    try:
+        import incubation_calc as calc
+    except Exception:
+        calc = None
+
+    unit = db.get_setting("temp_unit", "C")
+    incs = []
+    for inc in db.get_incubators():
+        row    = db.get_latest_reading(inc["id"])
+        temp_c = row["temperature_c"] if row else None
+        hum    = row["humidity_pct"]  if row else None
+        ts     = row["timestamp"]     if row else None
+
+        t_min, t_max = (calc.get_temp_range(inc) if calc else (None, None))
+        if temp_c is None:
+            temp_str, temp_col = "—", "#F3F4F6"
+        else:
+            temp_str = calc.format_temp(temp_c, unit) if calc else f"{temp_c:.1f}°{unit}"
+            if t_min is None:
+                temp_col = "#F3F4F6"
+            else:
+                temp_col = "#22C55E" if (t_min <= temp_c <= t_max) else "#EF4444"
+
+        poll_txt, poll_col = _mobile_poll_age(ts)
+        stats = db.get_tray_stats(incubator_id=inc["id"], status="active")
+        insp  = (idb.get_inspection_status(inc["id"]) if idb
+                 else {"morning": "pending", "evening": "pending"})
+
+        incs.append({
+            "id":           inc["id"],
+            "name":         inc["name"],
+            "temp":         temp_str,
+            "temp_color":   temp_col,
+            "humidity":     f"{hum:.0f}%" if hum is not None else "—",
+            "last_polled":  poll_txt,
+            "poll_color":   poll_col,
+            "trays":        stats["count"],
+            "capacity":     inc.get("capacity") or 0,
+            "morning_done": insp.get("morning") == "done",
+            "evening_done": insp.get("evening") == "done",
+        })
+    return {"incubators": incs, "unit": unit}
+
+
+_DASHBOARD_BODY = """
+<div class="topbar"><h1>🐝 Incubators</h1><span class="upd" id="upd"></span></div>
+<div class="wrap"><div id="cards"><div class="loading">Loading…</div></div></div>
+<script>
+async function load(){
+  try{
+    const r = await fetch('/api/dashboard', {cache:'no-store'});
+    const d = await r.json();
+    const c = document.getElementById('cards');
+    if(!d.incubators.length){ c.innerHTML = '<div class="loading">No incubators.</div>'; return; }
+    c.innerHTML = '';
+    d.incubators.forEach(function(i){
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML =
+        '<div class="cn">'+i.name+'</div>'+
+        '<div class="metrics">'+
+          '<div class="metric"><div class="ml">Temp</div><div class="mv" style="color:'+i.temp_color+'">'+i.temp+'</div></div>'+
+          '<div class="metric"><div class="ml">Humidity</div><div class="mv">'+i.humidity+'</div></div>'+
+        '</div>'+
+        '<div class="meta" style="color:'+i.poll_color+'">● Last polled: '+i.last_polled+'</div>'+
+        '<div class="meta">'+i.trays+' / '+i.capacity+' trays</div>'+
+        '<div class="pills">'+
+          '<span class="pill '+(i.morning_done?'g':'r')+'">🌅 AM '+(i.morning_done?'✓':'•')+'</span>'+
+          '<span class="pill '+(i.evening_done?'g':'r')+'">🌙 PM '+(i.evening_done?'✓':'•')+'</span>'+
+        '</div>';
+      c.appendChild(card);
+    });
+    document.getElementById('upd').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  }catch(e){
+    document.getElementById('cards').innerHTML = '<div class="loading">Connection lost — retrying…</div>';
+  }
+}
+load();
+setInterval(load, 20000);
+</script>
+"""
+
+
 # ── Flask app ─────────────────────────────────────────────────────────────────
 
 _flask_app: Optional[object] = None
@@ -168,6 +342,31 @@ def _make_flask_app():
     @app.route("/health")
     def health():
         return jsonify({"status": "ok"})
+
+    # ── Mobile web app (PWA) ──────────────────────────────────────────────────
+    @app.route("/")
+    def mobile_home():
+        return _mobile_page("Bee Incubators", _DASHBOARD_BODY, active="home")
+
+    @app.route("/api/dashboard")
+    def mobile_dashboard_data():
+        return jsonify(_dashboard_data())
+
+    @app.route("/m/inspections")
+    def mobile_inspections():
+        body = ('<div class="topbar"><h1>🔍 Inspections</h1></div>'
+                '<div class="wrap"><div class="card">'
+                '<div class="soon">Coming in the next update.</div>'
+                '</div></div>')
+        return _mobile_page("Inspections", body, active="inspect")
+
+    @app.route("/m/trays")
+    def mobile_trays():
+        body = ('<div class="topbar"><h1>📦 Trays</h1></div>'
+                '<div class="wrap"><div class="card">'
+                '<div class="soon">Coming in the next update.</div>'
+                '</div></div>')
+        return _mobile_page("Trays", body, active="trays")
 
     # ── VOC / ESP32 endpoints ─────────────────────────────────────────────────
     # ESP32 posts here every N minutes:
