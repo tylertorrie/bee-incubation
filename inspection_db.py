@@ -164,6 +164,31 @@ def get_inspection_by_id(inspection_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+def update_inspection(inspection_id: int, data: dict):
+    """Update the editable fields of an existing inspection.
+    Period and timestamp are preserved."""
+    with _db.get_conn() as conn:
+        conn.execute("""
+            UPDATE inspections SET
+                thermometer_temp_c=?, govee_temp_c=?, temp_diff_c=?, temp_alert=?,
+                heat_pumps_ok=?, parasites_emerging=?, bees_emerging=?,
+                fans_ok=?, black_lights_ok=?, notes=?
+            WHERE id=?
+        """, (
+            data.get("thermometer_temp_c"),
+            data.get("govee_temp_c"),
+            data.get("temp_diff_c"),
+            int(bool(data.get("temp_alert", False))),
+            int(bool(data.get("heat_pumps_ok", False))),
+            int(bool(data.get("parasites_emerging", False))),
+            int(bool(data.get("bees_emerging", False))),
+            int(bool(data.get("fans_ok", False))),
+            int(bool(data.get("black_lights_ok", False))),
+            data.get("notes", ""),
+            inspection_id,
+        ))
+
+
 def delete_inspection(inspection_id: int):
     with _db.get_conn() as conn:
         conn.execute("DELETE FROM inspections WHERE id=?", (inspection_id,))

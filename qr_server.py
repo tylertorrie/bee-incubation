@@ -339,7 +339,7 @@ def _pill_html(label: str, icon: str, done: bool) -> str:
     return f'<span class="pill {cls}">{icon} {label} {sym}</span>'
 
 
-def _inspection_record_html(r: dict) -> str:
+def _inspection_record_html(r: dict, actions: bool = False) -> str:
     """Compact card for one completed inspection."""
     from datetime import datetime
     period = r.get("period") or "manual"
@@ -381,78 +381,155 @@ def _inspection_record_html(r: dict) -> str:
     notes_html = (f'<div class="meta" style="margin-top:6px;color:#CBD5E1">“{notes}”</div>'
                   if notes else '')
 
+    actions_html = ''
+    if actions:
+        iid  = r.get("incubator_id")
+        rid  = r.get("id")
+        actions_html = (
+            '<div style="display:flex;gap:8px;margin-top:10px">'
+            f'<a class="ibtn" style="flex:1;margin-top:0;padding:9px" '
+            f'href="/m/inspect/{iid}/edit/{rid}">✎ Edit</a>'
+            f'<form method="POST" action="/m/inspection/{rid}/delete" style="flex:1" '
+            f'onsubmit="return confirm(\'Delete this inspection?\')">'
+            f'<button type="submit" style="width:100%;background:#7F1D1D;color:#fff;'
+            f'border:none;border-radius:10px;padding:9px;font-weight:700">🗑 Delete</button>'
+            '</form>'
+            '</div>'
+        )
+
     return (
         '<div class="card" style="padding:12px">'
         f'<div style="display:flex;justify-content:space-between;align-items:baseline">'
         f'<span style="font-weight:700;color:#F3F4F6">{icon} {r.get("incubator_name") or "—"}</span>'
         f'<span class="meta">{when}</span></div>'
-        + temp_html + flag_html + notes_html +
+        + temp_html + flag_html + notes_html + actions_html +
         '</div>'
     )
 
 
 def _inspections_list_body(saved_name: str = None) -> str:
+    """Inspections home: one card per incubator linking to its own history."""
     import inspection_db as idb
     parts = ['<div class="topbar"><h1>🔍 Inspections</h1></div><div class="wrap">']
     if saved_name:
         parts.append(f'<div class="banner">✓ Inspection saved for {saved_name}</div>')
 
-    # Today's status + record buttons
     for inc in db.get_incubators():
         st = idb.get_inspection_status(inc["id"])
         am = st.get("morning") == "done"
         pm = st.get("evening") == "done"
+        count = len(idb.get_inspections(incubator_id=inc["id"]))
         parts.append(
+            f'<a href="/m/inspections/{inc["id"]}" style="text-decoration:none;color:inherit">'
             '<div class="card">'
             f'<div class="cn">{inc["name"]}</div>'
             '<div class="bp">'
             + _pill_html("AM", "🌅", am) + _pill_html("PM", "🌙", pm) +
             '</div>'
-            f'<a class="ibtn" href="/m/inspect/{inc["id"]}">+ Record inspection</a>'
-            '</div>'
+            f'<div class="meta" style="margin-top:10px">📋 {count} report(s) — tap to view ›</div>'
+            '</div></a>'
         )
-
-    # Recent completed inspections
-    recent = idb.get_inspections(limit=25)
-    parts.append('<div class="ml" style="margin:18px 4px 8px">Recent inspections</div>')
-    if recent:
-        for r in recent:
-            parts.append(_inspection_record_html(r))
-    else:
-        parts.append('<div class="card"><div class="soon">No inspections recorded yet.</div></div>')
-
     parts.append('</div>')
     return "".join(parts)
 
 
-def _inspection_form_body(inc: dict, govee_temp, period: str) -> str:
+def _incubator_inspections_body(inc_id: int, saved: str = None) -> str:
+    """Per-incubator page: status, record button, and that incubator's reports."""
+    import inspection_db as idb
+    inc = next((i for i in db.get_incubators(include_hidden=True)
+                if i["id"] == inc_id), None)
+    if not inc:
+        return ('<div class="topbar"><h1>Inspections</h1></div>'
+                '<div class="wrap"><div class="card"><div class="soon">'
+                'Incubator not found.</div></div></div>')
+
+    st = idb.get_inspection_status(inc_id)
+    am = st.get("morning") == "done"
+    pm = st.get("evening") == "done"
+
+    parts = [
+        '<div class="topbar">'
+        f'<h1>🔍 {inc["name"]}</h1>'
+        '<a href="/m/inspections" style="color:#9CA3AF;text-decoration:none;font-size:.9rem">‹ Back</a>'
+        '</div><div class="wrap">'
+    ]
+    if saved:
+        parts.append(f'<div class="banner">✓ Saved</div>')
+
+    parts.append(
+        '<div class="card">'
+        '<div class="bp">'
+        + _pill_html("AM", "🌅", am) + _pill_html("PM", "🌙", pm) +
+        '</div>'
+        f'<a class="ibtn" href="/m/inspect/{inc_id}">+ Record inspection</a>'
+        '</div>'
+    )
+
+    reports = idb.get_inspections(incubator_id=inc_id)
+    parts.append('<div class="ml" style="margin:18px 4px 8px">Reports</div>')
+    if reports:
+        for r in reports:
+            parts.append(_inspection_record_html(r, actions=True))
+    else:
+        parts.append('<div class="card"><div class="soon">'
+                     'No inspections recorded yet.</div></div>')
+    parts.append('</div>')
+    return "".join(parts)
+
+
+def _inspection_form_body(inc: dict, govee_temp, period: str,
+                          existing: dict = None) -> str:
     from datetime import datetime
-    now_str   = datetime.now().strftime("%a %b %d  ·  %I:%M %p")
+    is_edit = existing is not None
     per_label = _PERIOD_LABEL.get(period, "Manual entry")
+
+    if is_edit:
+        action    = f'/m/inspect/{inc["id"]}/edit/{existing["id"]}'
+        title     = "✎ Edit Inspection"
+        ts        = existing.get("timestamp") or ""
+        try:
+            when_str = datetime.fromisoformat(ts).strftime("%a %b %d  ·  %I:%M %p")
+        except Exception:
+            when_str = ts[:16]
+        thermo_val = existing.get("thermometer_temp_c")
+        thermo_val = "" if thermo_val is None else f"{thermo_val}"
+        notes_val  = (existing.get("notes") or "")
+        btn_txt    = "💾  Update Inspection"
+    else:
+        action     = f'/m/inspect/{inc["id"]}'
+        title      = "🔍 Inspect"
+        when_str   = datetime.now().strftime("%a %b %d  ·  %I:%M %p")
+        thermo_val = ""
+        notes_val  = ""
+        btn_txt    = "💾  Save Inspection"
+
     govee_txt = (f"Govee reading: {govee_temp:.1f} °C" if govee_temp is not None
                  else "Govee reading: none available")
 
     checks = []
     for key, label, default in _CHECKLIST:
-        checked = "checked" if default else ""
+        if is_edit:
+            checked = "checked" if existing.get(key) else ""
+        else:
+            checked = "checked" if default else ""
         checks.append(
             f'<label class="chk"><span>{label}</span>'
             f'<input type="checkbox" name="{key}" {checked}></label>'
         )
 
     return (
-        '<div class="topbar"><h1>🔍 Inspect</h1></div><div class="wrap">'
+        f'<div class="topbar"><h1>{title}</h1></div><div class="wrap">'
         '<div class="card">'
         f'<div class="cn">{inc["name"]}</div>'
-        f'<div class="meta">{now_str}</div>'
+        f'<div class="meta">{when_str}</div>'
         f'<div class="period">● {per_label}</div>'
         f'<div class="gv">{govee_txt}</div>'
         '</div>'
-        f'<form method="POST" action="/m/inspect/{inc["id"]}">'
+        f'<form method="POST" action="{action}">'
         '<div class="card">'
         '<div class="fld"><label>Thermometer reading (°C)</label>'
-        '<input type="number" step="0.1" name="thermometer_temp_c" '
-        'inputmode="decimal" placeholder="e.g. 27.5"></div>'
+        f'<input type="number" step="0.1" name="thermometer_temp_c" '
+        f'inputmode="decimal" placeholder="e.g. 27.5" value="{thermo_val}"></div>'
         '</div>'
         '<div class="card">'
         '<div class="ml" style="margin-bottom:8px">Checklist</div>'
@@ -460,9 +537,9 @@ def _inspection_form_body(inc: dict, govee_temp, period: str) -> str:
         '</div>'
         '<div class="card">'
         '<div class="fld"><label>Notes</label>'
-        '<textarea name="notes" placeholder="Optional notes…"></textarea></div>'
+        f'<textarea name="notes" placeholder="Optional notes…">{notes_val}</textarea></div>'
         '</div>'
-        '<button class="savebtn" type="submit">💾  Save Inspection</button>'
+        f'<button class="savebtn" type="submit">{btn_txt}</button>'
         '</form>'
         '</div>'
     )
@@ -519,6 +596,41 @@ def _save_mobile_inspection(inc_id: int, form) -> Optional[str]:
         except Exception:
             pass
     return inc["name"]
+
+
+def _update_mobile_inspection(insp_id: int, form) -> Optional[int]:
+    """Update an existing inspection from mobile form data. Returns incubator_id."""
+    import inspection_db as idb
+    existing = idb.get_inspection_by_id(insp_id)
+    if not existing:
+        return None
+
+    govee_temp = existing.get("govee_temp_c")
+    thermo_c = None
+    raw = (form.get("thermometer_temp_c") or "").strip()
+    if raw:
+        try:
+            thermo_c = float(raw)
+        except ValueError:
+            thermo_c = None
+
+    temp_diff = temp_alert = None
+    if thermo_c is not None and govee_temp is not None:
+        temp_diff  = abs(thermo_c - govee_temp)
+        temp_alert = temp_diff > idb.TEMP_ALERT_THRESHOLD
+
+    data = {
+        "thermometer_temp_c": thermo_c,
+        "govee_temp_c":       govee_temp,
+        "temp_diff_c":        temp_diff,
+        "temp_alert":         bool(temp_alert),
+        "notes":              (form.get("notes") or "").strip(),
+    }
+    for key, _label, _default in _CHECKLIST:
+        data[key] = key in form
+
+    idb.update_inspection(insp_id, data)
+    return existing.get("incubator_id")
 
 
 # ── Flask app ─────────────────────────────────────────────────────────────────
@@ -587,6 +699,13 @@ def _make_flask_app():
                             _inspections_list_body(saved_name=saved),
                             active="inspect")
 
+    @app.route("/m/inspections/<int:inc_id>")
+    def mobile_incubator_inspections(inc_id):
+        saved = request.args.get("saved")
+        return _mobile_page("Inspections",
+                            _incubator_inspections_body(inc_id, saved=saved),
+                            active="inspect")
+
     @app.route("/m/inspect/<int:inc_id>", methods=["GET"])
     def mobile_inspect_form(inc_id):
         import inspection_db as idb
@@ -604,13 +723,45 @@ def _make_flask_app():
     @app.route("/m/inspect/<int:inc_id>", methods=["POST"])
     def mobile_inspect_save(inc_id):
         from flask import redirect
-        name = _save_mobile_inspection(inc_id, request.form)
+        _save_mobile_inspection(inc_id, request.form)
         if _on_update:
             _on_update(None)
-        if not name:
-            return redirect("/m/inspections")
-        from urllib.parse import quote
-        return redirect(f"/m/inspections?saved={quote(name)}")
+        return redirect(f"/m/inspections/{inc_id}?saved=1")
+
+    @app.route("/m/inspect/<int:inc_id>/edit/<int:insp_id>", methods=["GET"])
+    def mobile_inspect_edit_form(inc_id, insp_id):
+        import inspection_db as idb
+        inc = next((i for i in db.get_incubators(include_hidden=True)
+                    if i["id"] == inc_id), None)
+        existing = idb.get_inspection_by_id(insp_id)
+        if not inc or not existing:
+            return "<h2 style='color:red;padding:20px;font-family:sans-serif'>Not found</h2>", 404
+        return _mobile_page(f"Edit — {inc['name']}",
+                            _inspection_form_body(
+                                inc, existing.get("govee_temp_c"),
+                                existing.get("period", "manual"),
+                                existing=existing),
+                            active="inspect")
+
+    @app.route("/m/inspect/<int:inc_id>/edit/<int:insp_id>", methods=["POST"])
+    def mobile_inspect_edit_save(inc_id, insp_id):
+        from flask import redirect
+        _update_mobile_inspection(insp_id, request.form)
+        if _on_update:
+            _on_update(None)
+        return redirect(f"/m/inspections/{inc_id}?saved=1")
+
+    @app.route("/m/inspection/<int:insp_id>/delete", methods=["POST"])
+    def mobile_inspection_delete(insp_id):
+        from flask import redirect
+        import inspection_db as idb
+        existing = idb.get_inspection_by_id(insp_id)
+        inc_id = existing.get("incubator_id") if existing else None
+        if existing:
+            idb.delete_inspection(insp_id)
+        if _on_update:
+            _on_update(None)
+        return redirect(f"/m/inspections/{inc_id}" if inc_id else "/m/inspections")
 
     @app.route("/m/trays")
     def mobile_trays():
