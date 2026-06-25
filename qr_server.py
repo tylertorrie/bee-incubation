@@ -150,6 +150,30 @@ body{background:#0F172A;color:#F3F4F6;font-family:system-ui,-apple-system,sans-s
 .nav a{flex:1;text-align:center;color:#6B7280;text-decoration:none;font-size:.72rem;padding:6px 0}
 .nav a .ic{display:block;font-size:1.3rem;margin-bottom:2px}
 .nav a.active{color:#FFD700}
+.banner{background:#065F46;color:#D1FAE5;border-radius:10px;padding:12px;
+        text-align:center;font-weight:700;margin-bottom:12px}
+.period{display:inline-block;background:#78350F;color:#FBBF24;padding:4px 10px;
+        border-radius:8px;font-size:.78rem;font-weight:700;margin-top:6px}
+.gv{font-size:.9rem;color:#9CA3AF;margin-top:6px}
+.fld{margin-bottom:14px}
+.fld label{display:block;color:#9CA3AF;font-size:.82rem;margin-bottom:6px}
+.fld input[type=number],.fld textarea{width:100%;background:#374151;
+        border:1px solid #4b5563;border-radius:8px;color:#F3F4F6;padding:12px;font-size:1.05rem}
+.fld input:focus,.fld textarea:focus{outline:2px solid #FBBF24;border-color:#FBBF24}
+.fld textarea{min-height:72px;resize:vertical}
+.chk{display:flex;align-items:center;justify-content:space-between;padding:12px;
+     background:#263347;border-radius:10px;margin-bottom:8px}
+.chk span{font-size:.95rem}
+.chk input{width:26px;height:26px;accent-color:#16A34A}
+.savebtn{display:block;width:100%;background:#D97706;color:#111;font-weight:800;
+         font-size:1.1rem;padding:15px;border:none;border-radius:10px;margin-top:6px}
+.savebtn:active{background:#B45309}
+.ibtn{display:block;background:#1D4ED8;color:#fff;text-align:center;text-decoration:none;
+      padding:12px;border-radius:10px;font-weight:700;margin-top:10px}
+.donebtn{display:block;background:#15803D;color:#fff;text-align:center;text-decoration:none;
+      padding:12px;border-radius:10px;font-weight:700;margin-top:10px}
+.bp{display:flex;gap:8px;margin-top:10px}
+.bp .pill{flex:1}
 """
 
 
@@ -293,6 +317,146 @@ setInterval(load, 20000);
 """
 
 
+_PERIOD_LABEL = {
+    "morning": "Morning (6–10 am)",
+    "evening": "Evening (4–10 pm)",
+    "manual":  "Manual entry",
+}
+
+# Checklist items: (key, label, default_checked)
+_CHECKLIST = [
+    ("heat_pumps_ok",      "Heat pumps on & working",  True),
+    ("fans_ok",            "Fans on & working",        True),
+    ("black_lights_ok",    "All black lights working", True),
+    ("bees_emerging",      "Bees emerging",            False),
+    ("parasites_emerging", "Parasites emerging",       False),
+]
+
+
+def _pill_html(label: str, icon: str, done: bool) -> str:
+    cls = "g" if done else "r"
+    sym = "✓" if done else "•"
+    return f'<span class="pill {cls}">{icon} {label} {sym}</span>'
+
+
+def _inspections_list_body(saved_name: str = None) -> str:
+    import inspection_db as idb
+    parts = ['<div class="topbar"><h1>🔍 Inspections</h1></div><div class="wrap">']
+    if saved_name:
+        parts.append(f'<div class="banner">✓ Inspection saved for {saved_name}</div>')
+    for inc in db.get_incubators():
+        st = idb.get_inspection_status(inc["id"])
+        am = st.get("morning") == "done"
+        pm = st.get("evening") == "done"
+        parts.append(
+            '<div class="card">'
+            f'<div class="cn">{inc["name"]}</div>'
+            '<div class="bp">'
+            + _pill_html("AM", "🌅", am) + _pill_html("PM", "🌙", pm) +
+            '</div>'
+            f'<a class="ibtn" href="/m/inspect/{inc["id"]}">+ Record inspection</a>'
+            '</div>'
+        )
+    parts.append('</div>')
+    return "".join(parts)
+
+
+def _inspection_form_body(inc: dict, govee_temp, period: str) -> str:
+    from datetime import datetime
+    now_str   = datetime.now().strftime("%a %b %d  ·  %I:%M %p")
+    per_label = _PERIOD_LABEL.get(period, "Manual entry")
+    govee_txt = (f"Govee reading: {govee_temp:.1f} °C" if govee_temp is not None
+                 else "Govee reading: none available")
+
+    checks = []
+    for key, label, default in _CHECKLIST:
+        checked = "checked" if default else ""
+        checks.append(
+            f'<label class="chk"><span>{label}</span>'
+            f'<input type="checkbox" name="{key}" {checked}></label>'
+        )
+
+    return (
+        '<div class="topbar"><h1>🔍 Inspect</h1></div><div class="wrap">'
+        '<div class="card">'
+        f'<div class="cn">{inc["name"]}</div>'
+        f'<div class="meta">{now_str}</div>'
+        f'<div class="period">● {per_label}</div>'
+        f'<div class="gv">{govee_txt}</div>'
+        '</div>'
+        f'<form method="POST" action="/m/inspect/{inc["id"]}">'
+        '<div class="card">'
+        '<div class="fld"><label>Thermometer reading (°C)</label>'
+        '<input type="number" step="0.1" name="thermometer_temp_c" '
+        'inputmode="decimal" placeholder="e.g. 27.5"></div>'
+        '</div>'
+        '<div class="card">'
+        '<div class="ml" style="margin-bottom:8px">Checklist</div>'
+        + "".join(checks) +
+        '</div>'
+        '<div class="card">'
+        '<div class="fld"><label>Notes</label>'
+        '<textarea name="notes" placeholder="Optional notes…"></textarea></div>'
+        '</div>'
+        '<button class="savebtn" type="submit">💾  Save Inspection</button>'
+        '</form>'
+        '</div>'
+    )
+
+
+def _save_mobile_inspection(inc_id: int, form) -> Optional[str]:
+    """Save an inspection from mobile form data. Returns incubator name on success."""
+    import inspection_db as idb
+    inc = next((i for i in db.get_incubators(include_hidden=True)
+                if i["id"] == inc_id), None)
+    if not inc:
+        return None
+
+    row        = db.get_latest_reading(inc_id)
+    govee_temp = row["temperature_c"] if row else None
+
+    thermo_c = None
+    raw = (form.get("thermometer_temp_c") or "").strip()
+    if raw:
+        try:
+            thermo_c = float(raw)
+        except ValueError:
+            thermo_c = None
+
+    temp_diff = temp_alert = None
+    if thermo_c is not None and govee_temp is not None:
+        temp_diff  = abs(thermo_c - govee_temp)
+        temp_alert = temp_diff > idb.TEMP_ALERT_THRESHOLD
+
+    data = {
+        "incubator_id":       inc_id,
+        "period":             idb.get_current_period(),
+        "thermometer_temp_c": thermo_c,
+        "govee_temp_c":       govee_temp,
+        "temp_diff_c":        temp_diff,
+        "temp_alert":         bool(temp_alert),
+        "notes":              (form.get("notes") or "").strip(),
+    }
+    # Checkboxes only appear in the form when checked
+    for key, _label, _default in _CHECKLIST:
+        data[key] = key in form
+
+    idb.save_inspection(data)
+
+    if temp_alert:
+        try:
+            db.add_alert(
+                "inspection_temp",
+                (f"Inspection temp alert — {inc['name']}: "
+                 f"Thermometer {thermo_c:.1f}°C vs Govee {govee_temp:.1f}°C "
+                 f"(Δ {temp_diff:.1f}°C)"),
+                severity="warning", incubator_id=inc_id,
+            )
+        except Exception:
+            pass
+    return inc["name"]
+
+
 # ── Flask app ─────────────────────────────────────────────────────────────────
 
 _flask_app: Optional[object] = None
@@ -354,11 +518,35 @@ def _make_flask_app():
 
     @app.route("/m/inspections")
     def mobile_inspections():
-        body = ('<div class="topbar"><h1>🔍 Inspections</h1></div>'
-                '<div class="wrap"><div class="card">'
-                '<div class="soon">Coming in the next update.</div>'
-                '</div></div>')
-        return _mobile_page("Inspections", body, active="inspect")
+        saved = request.args.get("saved")
+        return _mobile_page("Inspections",
+                            _inspections_list_body(saved_name=saved),
+                            active="inspect")
+
+    @app.route("/m/inspect/<int:inc_id>", methods=["GET"])
+    def mobile_inspect_form(inc_id):
+        import inspection_db as idb
+        inc = next((i for i in db.get_incubators(include_hidden=True)
+                    if i["id"] == inc_id), None)
+        if not inc:
+            return "<h2 style='color:red;padding:20px;font-family:sans-serif'>Incubator not found</h2>", 404
+        row    = db.get_latest_reading(inc_id)
+        govee  = row["temperature_c"] if row else None
+        period = idb.get_current_period()
+        return _mobile_page(f"Inspect {inc['name']}",
+                            _inspection_form_body(inc, govee, period),
+                            active="inspect")
+
+    @app.route("/m/inspect/<int:inc_id>", methods=["POST"])
+    def mobile_inspect_save(inc_id):
+        from flask import redirect
+        name = _save_mobile_inspection(inc_id, request.form)
+        if _on_update:
+            _on_update(None)
+        if not name:
+            return redirect("/m/inspections")
+        from urllib.parse import quote
+        return redirect(f"/m/inspections?saved={quote(name)}")
 
     @app.route("/m/trays")
     def mobile_trays():
