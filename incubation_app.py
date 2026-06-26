@@ -58,7 +58,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.5.0"   # bump on meaningful releases
+APP_VERSION = "1.6.0"   # bump on meaningful releases
 
 
 def _git_revision() -> str:
