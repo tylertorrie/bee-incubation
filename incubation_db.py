@@ -227,8 +227,15 @@ def init_db():
         conn.execute("UPDATE temp_humidity_readings SET is_downsampled=0 WHERE is_downsampled IS NULL")
         # Key used to suppress repeated/duplicate alerts
         _safe_add_column(conn, "alerts", "dedup_key", "TEXT")
-        # When a tray entered cooling (for cool-down duration tracking)
-        _safe_add_column(conn, "trays", "cool_date", "TEXT")
+        # Sample fields matching the field spreadsheet (live bees/lb, etc.)
+        for _col, _typ in [
+            ("total_weight_kg", "REAL"), ("live_bees_per_lb", "REAL"),
+            ("live_bees_per_kg", "REAL"), ("parasites", "REAL"),
+            ("chalkbrood", "REAL"), ("kg_per_2gal", "REAL"),
+            ("lbs_per_2gal", "REAL"), ("total_trays", "REAL"),
+            ("incubator_space", "TEXT"),
+        ]:
+            _safe_add_column(conn, "samples", _col, _typ)
 
         # Backfill NULLs left by the migration (rows that existed before the column was added)
         conn.execute("UPDATE incubators SET is_hidden=0           WHERE is_hidden IS NULL")
@@ -264,9 +271,19 @@ def init_db():
                     notes                   TEXT    DEFAULT ''
                 );
 
-                INSERT INTO trays SELECT * FROM _trays_old;
+                INSERT INTO trays (id, tray_number, sample_id, incubation_batch_id,
+                    incubator_id, weight_lbs, live_count, parasite_level_pct,
+                    volume_gal, in_date, out_date, status, notes)
+                SELECT id, tray_number, sample_id, incubation_batch_id,
+                    incubator_id, weight_lbs, live_count, parasite_level_pct,
+                    volume_gal, in_date, out_date, status, notes
+                FROM _trays_old;
                 DROP TABLE _trays_old;
             """)
+
+        # When a tray entered cooling (for cool-down duration tracking)
+        # Added after the UNIQUE-drop rebuild so a fresh DB keeps the column.
+        _safe_add_column(conn, "trays", "cool_date", "TEXT")
 
         # Performance indexes
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trays_incubator_status ON trays(incubator_id, status)")
@@ -362,16 +379,49 @@ def get_samples() -> list:
 
 def upsert_sample(data: dict) -> int:
     cols = ["name", "source", "lot_number", "xray_live_pct", "xray_parasite_pct",
-            "xray_dead_pct", "total_volume_gal", "total_weight_lbs", "notes", "import_date"]
+            "xray_dead_pct", "total_volume_gal", "total_weight_lbs",
+            "total_weight_kg", "live_bees_per_lb", "live_bees_per_kg",
+            "parasites", "chalkbrood", "kg_per_2gal", "lbs_per_2gal",
+            "total_trays", "incubator_space", "notes", "import_date"]
     with get_conn() as conn:
         if data.get("id"):
             sets = ", ".join(f"{c}=?" for c in cols)
             vals = [data.get(c) for c in cols] + [data["id"]]
             conn.execute(f"UPDATE samples SET {sets} WHERE id=?", vals)
             return int(data["id"])
-        vals = [data.get(c, "") for c in cols]
+        vals = [data.get(c) for c in cols]
         if not vals[-1]:  # import_date
             vals[-1] = datetime.now().date().isoformat()
+        cur = conn.execute(
+            f"INSERT INTO samples ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})",
+            vals)
+        return cur.lastrowid
+
+
+def upsert_sample_by_name(data: dict) -> int | None:
+    """Match an existing sample by name (case-insensitive) and update only the
+    provided fields; create a new sample if the name isn't found. Keeps tray
+    links intact. Returns the sample id."""
+    name = (data.get("name") or "").strip()
+    if not name:
+        return None
+    valid = {"source", "lot_number", "total_volume_gal", "total_weight_lbs",
+             "total_weight_kg", "live_bees_per_lb", "live_bees_per_kg",
+             "parasites", "chalkbrood", "kg_per_2gal", "lbs_per_2gal",
+             "total_trays", "incubator_space", "notes", "import_date"}
+    fields = [k for k in data if k in valid]
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM samples WHERE name=? COLLATE NOCASE", (name,)).fetchone()
+        if row:
+            sid = row["id"]
+            if fields:
+                sets = ", ".join(f"{k}=?" for k in fields)
+                conn.execute(f"UPDATE samples SET {sets} WHERE id=?",
+                             [data[k] for k in fields] + [sid])
+            return sid
+        cols = ["name"] + fields
+        vals = [name] + [data[k] for k in fields]
         cur = conn.execute(
             f"INSERT INTO samples ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})",
             vals)

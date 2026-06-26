@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.8.3"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.9.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -530,15 +530,18 @@ class SampleDialog(ctk.CTkToplevel):
         f.columnconfigure(1, weight=1)
 
         fields = [
-            ("Sample Name *",     "name",              "e.g. AB-103"),
-            ("Source / Supplier", "source",            ""),
-            ("Lot Number",        "lot_number",        ""),
-            ("Live % (x-ray)",    "xray_live_pct",     "e.g. 0.82"),
-            ("Parasite % (x-ray)","xray_parasite_pct", "e.g. 0.05"),
-            ("Dead % (x-ray)",    "xray_dead_pct",     "e.g. 0.13"),
-            ("Total Volume (gal)","total_volume_gal",  ""),
-            ("Total Weight (lbs)","total_weight_lbs",  ""),
-            ("Import Date",       "import_date",       "YYYY-MM-DD"),
+            ("Sample Name *",       "name",              "e.g. RR-4"),
+            ("Total Pounds",        "total_weight_lbs",  ""),
+            ("Total Kgs",           "total_weight_kg",   ""),
+            ("Live Bees per Pound", "live_bees_per_lb",  ""),
+            ("Live Bees per KG",    "live_bees_per_kg",  ""),
+            ("Parasites",           "parasites",         ""),
+            ("Chalkbrood",          "chalkbrood",        ""),
+            ("Total Gal Bees",      "total_volume_gal",  ""),
+            ("Total KG for 2gal",   "kg_per_2gal",       ""),
+            ("Total lbs for 2gal",  "lbs_per_2gal",      ""),
+            ("Total Trays",         "total_trays",       ""),
+            ("Incubator Space",     "incubator_space",   ""),
         ]
         self._rows = {}
         for i, (lbl, key, ph) in enumerate(fields):
@@ -569,11 +572,11 @@ class SampleDialog(ctk.CTkToplevel):
             messagebox.showerror("Error", "Sample name is required.", parent=self)
             return
         data = {"id": self.sample.get("id"), "name": name,
-                "notes": self._notes.get("1.0", "end").strip()}
-        for key in ("source", "lot_number", "import_date"):
-            data[key] = self._rows[key].get()
-        for key in ("xray_live_pct", "xray_parasite_pct", "xray_dead_pct",
-                    "total_volume_gal", "total_weight_lbs"):
+                "notes": self._notes.get("1.0", "end").strip(),
+                "incubator_space": self._rows["incubator_space"].get() or None}
+        for key in ("total_weight_lbs", "total_weight_kg", "live_bees_per_lb",
+                    "live_bees_per_kg", "parasites", "chalkbrood",
+                    "total_volume_gal", "kg_per_2gal", "lbs_per_2gal", "total_trays"):
             val = self._rows[key].get()
             try:
                 data[key] = float(val) if val else None
@@ -1393,8 +1396,8 @@ class IncubationApp(ctk.CTk):
         _btn(hdr, "+ Add Sample", lambda: self._open_sample_dialog(),
              fg=CARD, hover=CARD2, width=130).pack(side="right", padx=6)
 
-        cols = ("Name", "Lot", "Live %", "Parasite %", "Total Gal",
-                "Live Gal", "Trays@2gal", "Lbs/Tray", "Notes")
+        cols = ("Name", "Total Lbs", "Live Bees/Lb", "Parasites", "Chalkbrood",
+                "Total Gal", "Lbs for 2gal", "Total Trays", "Inc. Space", "Notes")
         self._smp_tree = self._make_tree(frame, cols)
         self._smp_tree.pack(fill="both", expand=True, padx=12, pady=4)
         self._smp_tree.bind("<Double-1>", self._on_sample_double_click)
@@ -1404,25 +1407,20 @@ class IncubationApp(ctk.CTk):
         tree = self._smp_tree
         tree.delete(*tree.get_children())
 
-        lbs_per_gal    = float(db.get_setting("lbs_per_gal", "2.2"))
-        target_gal     = float(db.get_setting("target_gals_per_tray", "2.0"))
-        samples        = db.get_samples()
+        def _n(v, dec=1):
+            return f"{v:,.{dec}f}" if isinstance(v, (int, float)) else "—"
 
-        for s in samples:
-            live_pct = s.get("xray_live_pct") or 0
-            para_pct = s.get("xray_parasite_pct") or 0
-            vol      = s.get("total_volume_gal") or 0
-            summary  = calc.calc_sample_summary(vol, live_pct, target_gal, lbs_per_gal)
-
+        for s in db.get_samples():
             tree.insert("", "end", iid=str(s["id"]), values=(
                 s["name"],
-                s.get("lot_number") or "—",
-                f"{live_pct*100:.1f}%" if live_pct else "—",
-                f"{para_pct*100:.1f}%" if para_pct else "—",
-                f"{vol:.2f}" if vol else "—",
-                f"{summary['live_gals_total']:.2f}" if vol and live_pct else "—",
-                str(summary["tray_count"]) if vol and live_pct else "—",
-                f"{summary['raw_lbs_per_tray']:.2f}" if vol and live_pct else "—",
+                _n(s.get("total_weight_lbs")),
+                _n(s.get("live_bees_per_lb"), 0),
+                _n(s.get("parasites")),
+                _n(s.get("chalkbrood")),
+                _n(s.get("total_volume_gal")),
+                _n(s.get("lbs_per_2gal"), 2),
+                _n(s.get("total_trays"), 0),
+                s.get("incubator_space") or "—",
                 s.get("notes") or "",
             ))
 
@@ -3269,80 +3267,83 @@ class IncubationApp(ctk.CTk):
             else:
                 messagebox.showwarning(
                     "Import",
-                    "No rows imported. Check that the spreadsheet has a header row "
-                    "with recognizable column names (Name/Sample, Live%, Parasite%, "
-                    "Dead%, Volume/Gal, Weight/Lbs)."
+                    "No rows imported. The spreadsheet needs a header row with a "
+                    "'Sample Name' column (plus Total Pounds, Live Bees per Pound, "
+                    "Parasites, Chalkbrood, Total Gal Bees, Total lbs for 2gal, "
+                    "Total Trays, Incubator Space, Notes, etc.)."
                 )
         except Exception as exc:
             messagebox.showerror("Import Error", str(exc))
 
+    # Maps the field spreadsheet's headers (normalized) -> sample DB fields.
+    _SAMPLE_HEADER_MAP = {
+        "sample name":          "name",
+        "total pounds":         "total_weight_lbs",
+        "total kgs":            "total_weight_kg",
+        "live bees per pound":  "live_bees_per_lb",
+        "parasites":            "parasites",
+        "chalkbrood":           "chalkbrood",
+        "total gal bees":       "total_volume_gal",
+        "live bees per kg":     "live_bees_per_kg",
+        "total kg for 2gal":    "kg_per_2gal",
+        "total lbs for 2gal":   "lbs_per_2gal",
+        "total trays":          "total_trays",
+        "incubator space":      "incubator_space",
+        "notes":                "notes",
+    }
+    _SAMPLE_TEXT_FIELDS = {"name", "incubator_space", "notes"}
+
     def _parse_xray_spreadsheet(self, path: str) -> int:
-        """
-        Parse an x-ray results spreadsheet.
-        Auto-detects column names (case-insensitive, partial match).
+        """Import the field sample spreadsheet (CSV or Excel).
+
+        Matches each row to an existing sample by name and updates it (keeping
+        tray links); creates a new sample if the name isn't found.
         Returns count of rows imported.
         """
         if path.lower().endswith(".csv"):
             import csv
             with open(path, newline="", encoding="utf-8-sig") as fh:
-                reader = csv.DictReader(fh)
-                rows = list(reader)
+                rows = list(csv.DictReader(fh))
         else:
             wb   = openpyxl.load_workbook(path, data_only=True)
             ws   = wb.active
             hdrs = [str(c.value or "").strip() for c in next(ws.iter_rows(max_row=1))]
-            rows = []
-            for r in ws.iter_rows(min_row=2, values_only=True):
-                rows.append(dict(zip(hdrs, r)))
+            rows = [dict(zip(hdrs, r))
+                    for r in ws.iter_rows(min_row=2, values_only=True)]
 
-        def _find(row, *keywords):
-            for k in row:
-                kl = k.lower()
-                if any(kw in kl for kw in keywords):
-                    v = row[k]
-                    return str(v).strip() if v is not None else None
-            return None
+        def _norm(h):
+            return " ".join(str(h or "").strip().lower().replace("?", "").split())
 
-        def _pct(val):
-            """Convert '82%' or '0.82' or '82' → float 0–1."""
-            if val is None:
+        def _num(v):
+            if v is None:
                 return None
-            v = str(val).replace("%", "").strip()
+            s = str(v).replace(",", "").replace("%", "").replace("$", "").strip()
+            if s == "":
+                return None
             try:
-                f = float(v)
-                return f / 100.0 if f > 1.0 else f
+                return float(s)
             except ValueError:
                 return None
 
         count = 0
         for row in rows:
-            name = _find(row, "name", "sample", "lot", "id")
+            # Map this row's headers to our fields
+            mapped = {}
+            for raw_key, raw_val in row.items():
+                field = self._SAMPLE_HEADER_MAP.get(_norm(raw_key))
+                if not field:
+                    continue
+                if field in self._SAMPLE_TEXT_FIELDS:
+                    mapped[field] = (str(raw_val).strip() if raw_val is not None else None)
+                else:
+                    mapped[field] = _num(raw_val)
+
+            name = (mapped.get("name") or "").strip()
             if not name:
                 continue
-            data = {
-                "name":               name,
-                "lot_number":         _find(row, "lot"),
-                "source":             _find(row, "source", "supplier", "grower"),
-                "xray_live_pct":      _pct(_find(row, "live", "viable")),
-                "xray_parasite_pct":  _pct(_find(row, "parasit")),
-                "xray_dead_pct":      _pct(_find(row, "dead", "stain")),
-                "total_volume_gal":   None,
-                "total_weight_lbs":   None,
-                "import_date":        datetime.now().date().isoformat(),
-            }
-            vol = _find(row, "volume", "gal", "vol")
-            if vol:
-                try:
-                    data["total_volume_gal"] = float(str(vol).replace(",", ""))
-                except ValueError:
-                    pass
-            wt = _find(row, "weight", "lbs", "lb", "kg")
-            if wt:
-                try:
-                    data["total_weight_lbs"] = float(str(wt).replace(",", ""))
-                except ValueError:
-                    pass
-            db.upsert_sample(data)
+            mapped["name"] = name
+            mapped["import_date"] = datetime.now().date().isoformat()
+            db.upsert_sample_by_name(mapped)
             count += 1
         return count
 
