@@ -288,6 +288,7 @@ def _dashboard_data() -> dict:
 
 def _dashboard_card_html(i: dict) -> str:
     return (
+        f'<a href="/m/incubator/{i["id"]}" style="text-decoration:none;color:inherit">'
         '<div class="card">'
         f'<div class="cn">{i["name"]}</div>'
         '<div class="metrics">'
@@ -301,7 +302,7 @@ def _dashboard_card_html(i: dict) -> str:
         '<div class="pills">'
         f'<span class="pill {"g" if i["morning_done"] else "r"}">🌅 AM {"✓" if i["morning_done"] else "•"}</span>'
         f'<span class="pill {"g" if i["evening_done"] else "r"}">🌙 PM {"✓" if i["evening_done"] else "•"}</span>'
-        '</div></div>'
+        '</div></div></a>'
     )
 
 
@@ -322,7 +323,10 @@ def _dashboard_body() -> str:
         '  if(!d.incubators.length){ c.innerHTML = "<div class=\\"loading\\">No incubators.</div>"; return; }'
         '  c.innerHTML = "";'
         '  d.incubators.forEach(function(i){'
-        '    const card = document.createElement("div"); card.className = "card";'
+        '    const card = document.createElement("a"); card.className = "card";'
+        '    card.href = "/m/incubator/" + i.id;'
+        '    card.style.textDecoration = "none"; card.style.color = "inherit";'
+        '    card.style.display = "block";'
         '    card.innerHTML ='
         '      "<div class=\\"cn\\">"+i.name+"</div>"+'
         '      "<div class=\\"metrics\\">"+'
@@ -342,6 +346,167 @@ def _dashboard_body() -> str:
         '}'
         'setInterval(load, 20000);'
         '</script>'
+    )
+
+
+def _svg_chart(readings: list, unit: str, t_min, t_max) -> str:
+    """Self-contained inline SVG temp+humidity chart (no JS library)."""
+    from datetime import datetime
+    W, H = 360, 210
+    padL, padR, padT, padB = 6, 6, 10, 4
+    plotW, plotH = W - padL - padR, H - padT - padB
+
+    pts = []
+    for r in readings:
+        try:
+            t = datetime.fromisoformat(r["timestamp"])
+        except Exception:
+            continue
+        tc = r.get("temperature_c")
+        if tc is not None and unit == "F":
+            tc = tc * 9 / 5 + 32
+        pts.append((t, tc, r.get("humidity_pct")))
+
+    if len(pts) < 2:
+        return ('<div class="meta" style="text-align:center;padding:30px">'
+                'Not enough readings in this range yet.</div>')
+
+    t0, t1 = pts[0][0].timestamp(), pts[-1][0].timestamp()
+    span = (t1 - t0) or 1
+    tvals = [p[1] for p in pts if p[1] is not None]
+    hvals = [p[2] for p in pts if p[2] is not None]
+    if not tvals:
+        return ('<div class="meta" style="text-align:center;padding:30px">'
+                'No temperature data in this range.</div>')
+
+    tlo, thi = min(tvals), max(tvals)
+    band_lo = band_hi = None
+    if t_min is not None:
+        lo, hi = (t_min, t_max)
+        if unit == "F":
+            lo, hi = lo * 9 / 5 + 32, hi * 9 / 5 + 32
+        band_lo, band_hi = lo, hi
+        tlo, thi = min(tlo, lo), max(thi, hi)
+    if thi == tlo:
+        thi = tlo + 1
+    pad = (thi - tlo) * 0.12; tlo -= pad; thi += pad
+    hlo = min(hvals) if hvals else 0
+    hhi = max(hvals) if hvals else 100
+    if hhi == hlo:
+        hhi = hlo + 1
+    hpad = (hhi - hlo) * 0.12; hlo -= hpad; hhi += hpad
+
+    def X(t):  return padL + (t.timestamp() - t0) / span * plotW
+    def Yt(v): return padT + plotH - (v - tlo) / (thi - tlo) * plotH
+    def Yh(v): return padT + plotH - (v - hlo) / (hhi - hlo) * plotH
+
+    band = ""
+    if band_lo is not None:
+        y1, y2 = Yt(band_hi), Yt(band_lo)
+        band = (f'<rect x="{padL}" y="{y1:.1f}" width="{plotW}" '
+                f'height="{max(0,y2-y1):.1f}" fill="#EF4444" opacity="0.10"/>')
+
+    temp_pts = " ".join(f"{X(t):.1f},{Yt(v):.1f}" for t, v, _ in pts if v is not None)
+    hum_pts  = " ".join(f"{X(t):.1f},{Yh(v):.1f}" for t, _, v in pts if v is not None)
+
+    return (
+        f'<svg viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="none" '
+        f'style="background:#111827;border-radius:10px">'
+        + band +
+        f'<polyline points="{hum_pts}" fill="none" stroke="#60A5FA" '
+        f'stroke-width="1.4" stroke-dasharray="3,3" opacity="0.85"/>'
+        f'<polyline points="{temp_pts}" fill="none" stroke="#FFD700" stroke-width="2"/>'
+        f'<text x="{padL+2}" y="{padT+10}" fill="#FFD700" font-size="11">{thi:.0f}°{unit}</text>'
+        f'<text x="{padL+2}" y="{padT+plotH-2}" fill="#FFD700" font-size="11">{tlo:.0f}°{unit}</text>'
+        f'<text x="{W-padR-2}" y="{padT+10}" fill="#60A5FA" font-size="11" text-anchor="end">{hhi:.0f}%</text>'
+        f'<text x="{W-padR-2}" y="{padT+plotH-2}" fill="#60A5FA" font-size="11" text-anchor="end">{hlo:.0f}%</text>'
+        '</svg>'
+    )
+
+
+def _incubator_detail_body(inc_id: int, hours: int) -> str:
+    try:
+        import inspection_db as idb
+    except Exception:
+        idb = None
+    try:
+        import incubation_calc as calc
+    except Exception:
+        calc = None
+
+    inc = next((i for i in db.get_incubators(include_hidden=True)
+                if i["id"] == inc_id), None)
+    if not inc:
+        return ('<div class="topbar"><h1>Incubator</h1></div><div class="wrap">'
+                '<div class="card"><div class="soon">Not found.</div></div></div>')
+
+    unit = db.get_setting("temp_unit", "C")
+    row  = db.get_latest_reading(inc_id)
+    temp_c = row["temperature_c"] if row else None
+    hum    = row["humidity_pct"]  if row else None
+    ts     = row["timestamp"]     if row else None
+    t_min, t_max = (calc.get_temp_range(inc) if calc else (None, None))
+
+    if temp_c is None:
+        temp_str, temp_col = "—", "#F3F4F6"
+    else:
+        temp_str = calc.format_temp(temp_c, unit) if calc else f"{temp_c:.1f}°{unit}"
+        temp_col = ("#22C55E" if (t_min is not None and t_min <= temp_c <= t_max)
+                    else ("#EF4444" if t_min is not None else "#F3F4F6"))
+    hum_str = f"{hum:.0f}%" if hum is not None else "—"
+    poll_txt, poll_col = _mobile_poll_age(ts)
+
+    readings = db.get_readings_hours(inc_id, hours)
+    chart    = _svg_chart(readings, unit, t_min, t_max)
+
+    ranges = [("24H", 24), ("7D", 24 * 7), ("30D", 24 * 30)]
+    rbtns = "".join(
+        f'<a href="/m/incubator/{inc_id}?h={h}" '
+        f'style="flex:1;text-align:center;padding:8px;border-radius:8px;'
+        f'text-decoration:none;font-weight:700;'
+        f'background:{"#D97706" if h==hours else "#263347"};'
+        f'color:{"#111" if h==hours else "#9CA3AF"}">{lbl}</a>'
+        for lbl, h in ranges)
+
+    stats = db.get_tray_stats(incubator_id=inc_id, status="active")
+    am = pm = False
+    if idb:
+        st = idb.get_inspection_status(inc_id)
+        am = st.get("morning") == "done"
+        pm = st.get("evening") == "done"
+
+    return (
+        '<div class="topbar">'
+        f'<h1>{inc["name"]}</h1>'
+        '<a href="/" style="color:#9CA3AF;text-decoration:none;font-size:.9rem">‹ Home</a>'
+        '</div><div class="wrap">'
+        '<div class="card">'
+        '<div class="metrics">'
+        f'<div class="metric"><div class="ml">Temp</div>'
+        f'<div class="mv" style="color:{temp_col}">{temp_str}</div></div>'
+        f'<div class="metric"><div class="ml">Humidity</div>'
+        f'<div class="mv">{hum_str}</div></div>'
+        '</div>'
+        f'<div class="meta" style="color:{poll_col}">● Last polled: {poll_txt}</div>'
+        '<div class="bp">'
+        + _pill_html("AM", "🌅", am) + _pill_html("PM", "🌙", pm) +
+        '</div>'
+        '</div>'
+        '<div class="card">'
+        f'<div style="display:flex;gap:8px;margin-bottom:10px">{rbtns}</div>'
+        f'{chart}'
+        '<div style="display:flex;justify-content:space-between;margin-top:6px">'
+        '<span class="meta" style="color:#FFD700">— Temp</span>'
+        '<span class="meta" style="color:#60A5FA">- - Humidity</span>'
+        '</div>'
+        '</div>'
+        f'<a class="ibtn" href="/m/trays/{inc_id}">📦 {stats["count"]} active trays ·'
+        f' {stats["total_gals"]:.1f} gal ›</a>'
+        f'<a class="ibtn" style="background:#15803D" href="/m/inspections/{inc_id}">'
+        '🔍 Inspections & reports ›</a>'
+        f'<a class="ibtn" style="background:#1D4ED8" href="/m/inspect/{inc_id}">'
+        '+ Record inspection</a>'
+        '</div>'
     )
 
 
@@ -981,6 +1146,18 @@ def _make_flask_app():
     @app.route("/api/dashboard")
     def mobile_dashboard_data():
         return jsonify(_dashboard_data())
+
+    @app.route("/m/incubator/<int:inc_id>")
+    def mobile_incubator_detail(inc_id):
+        try:
+            hours = int(request.args.get("h", 24))
+        except (TypeError, ValueError):
+            hours = 24
+        if hours not in (24, 24 * 7, 24 * 30):
+            hours = 24
+        return _mobile_page("Incubator",
+                            _incubator_detail_body(inc_id, hours),
+                            active="home")
 
     @app.route("/m/inspections")
     def mobile_inspections():
