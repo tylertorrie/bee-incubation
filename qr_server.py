@@ -287,9 +287,10 @@ def _dashboard_data() -> dict:
 
 
 def _dashboard_card_html(i: dict) -> str:
+    iid = i["id"]
     return (
-        f'<a href="/m/incubator/{i["id"]}" style="text-decoration:none;color:inherit">'
         '<div class="card">'
+        f'<a href="/m/incubator/{iid}" style="text-decoration:none;color:inherit;display:block">'
         f'<div class="cn">{i["name"]}</div>'
         '<div class="metrics">'
         f'<div class="metric"><div class="ml">Temp</div>'
@@ -299,10 +300,11 @@ def _dashboard_card_html(i: dict) -> str:
         '</div>'
         f'<div class="meta" style="color:{i["poll_color"]}">● Last polled: {i["last_polled"]}</div>'
         f'<div class="meta">{i["trays"]} / {i["capacity"]} trays</div>'
+        '</a>'
         '<div class="pills">'
-        f'<span class="pill {"g" if i["morning_done"] else "r"}">🌅 AM {"✓" if i["morning_done"] else "•"}</span>'
-        f'<span class="pill {"g" if i["evening_done"] else "r"}">🌙 PM {"✓" if i["evening_done"] else "•"}</span>'
-        '</div></div></a>'
+        + _pill_html("AM", "🌅", i["morning_done"], href=f"/m/inspect/{iid}")
+        + _pill_html("PM", "🌙", i["evening_done"], href=f"/m/inspect/{iid}")
+        + '</div></div>'
     )
 
 
@@ -323,21 +325,19 @@ def _dashboard_body() -> str:
         '  if(!d.incubators.length){ c.innerHTML = "<div class=\\"loading\\">No incubators.</div>"; return; }'
         '  c.innerHTML = "";'
         '  d.incubators.forEach(function(i){'
-        '    const card = document.createElement("a"); card.className = "card";'
-        '    card.href = "/m/incubator/" + i.id;'
-        '    card.style.textDecoration = "none"; card.style.color = "inherit";'
-        '    card.style.display = "block";'
+        '    const card = document.createElement("div"); card.className = "card";'
         '    card.innerHTML ='
+        '      "<a href=\\"/m/incubator/"+i.id+"\\" style=\\"text-decoration:none;color:inherit;display:block\\">"+'
         '      "<div class=\\"cn\\">"+i.name+"</div>"+'
         '      "<div class=\\"metrics\\">"+'
         '        "<div class=\\"metric\\"><div class=\\"ml\\">Temp</div><div class=\\"mv\\" style=\\"color:"+i.temp_color+"\\">"+i.temp+"</div></div>"+'
         '        "<div class=\\"metric\\"><div class=\\"ml\\">Humidity</div><div class=\\"mv\\">"+i.humidity+"</div></div>"+'
         '      "</div>"+'
         '      "<div class=\\"meta\\" style=\\"color:"+i.poll_color+"\\">\\u25CF Last polled: "+i.last_polled+"</div>"+'
-        '      "<div class=\\"meta\\">"+i.trays+" / "+i.capacity+" trays</div>"+'
+        '      "<div class=\\"meta\\">"+i.trays+" / "+i.capacity+" trays</div></a>"+'
         '      "<div class=\\"pills\\">"+'
-        '        "<span class=\\"pill "+(i.morning_done?"g":"r")+"\\">\\uD83C\\uDF05 AM "+(i.morning_done?"\\u2713":"\\u2022")+"</span>"+'
-        '        "<span class=\\"pill "+(i.evening_done?"g":"r")+"\\">\\uD83C\\uDF19 PM "+(i.evening_done?"\\u2713":"\\u2022")+"</span>"+'
+        '        "<a class=\\"pill "+(i.morning_done?"g":"r")+"\\" href=\\"/m/inspect/"+i.id+"\\" style=\\"text-decoration:none\\">\\uD83C\\uDF05 AM "+(i.morning_done?"\\u2713":"\\u2022")+"</a>"+'
+        '        "<a class=\\"pill "+(i.evening_done?"g":"r")+"\\" href=\\"/m/inspect/"+i.id+"\\" style=\\"text-decoration:none\\">\\uD83C\\uDF19 PM "+(i.evening_done?"\\u2713":"\\u2022")+"</a>"+'
         '      "</div>";'
         '    c.appendChild(card);'
         '  });'
@@ -489,7 +489,8 @@ def _incubator_detail_body(inc_id: int, hours: int) -> str:
         '</div>'
         f'<div class="meta" style="color:{poll_col}">● Last polled: {poll_txt}</div>'
         '<div class="bp">'
-        + _pill_html("AM", "🌅", am) + _pill_html("PM", "🌙", pm) +
+        + _pill_html("AM", "🌅", am, href=f"/m/inspect/{inc_id}")
+        + _pill_html("PM", "🌙", pm, href=f"/m/inspect/{inc_id}") +
         '</div>'
         '</div>'
         '<div class="card">'
@@ -526,10 +527,13 @@ _CHECKLIST = [
 ]
 
 
-def _pill_html(label: str, icon: str, done: bool) -> str:
+def _pill_html(label: str, icon: str, done: bool, href: str = None) -> str:
     cls = "g" if done else "r"
     sym = "✓" if done else "•"
-    return f'<span class="pill {cls}">{icon} {label} {sym}</span>'
+    inner = f'{icon} {label} {sym}'
+    if href:
+        return f'<a class="pill {cls}" href="{href}" style="text-decoration:none">{inner}</a>'
+    return f'<span class="pill {cls}">{inner}</span>'
 
 
 def _inspection_record_html(r: dict, actions: bool = False) -> str:
