@@ -11,6 +11,22 @@ from datetime import datetime, timedelta
 _SRC_DIR    = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_FILE = os.path.join(_SRC_DIR, "incubation_config.json")
 
+# ── Tray status: stored value -> display label ────────────────────────────────
+# "active" is shown as "Incubation". Stored values stay stable so existing
+# queries (status="active", etc.) keep working.
+TRAY_STATUS_OPTIONS  = [("active", "Incubation"), ("cooled", "Cooled"), ("released", "Released")]
+TRAY_STATUS_LABELS   = {"active": "Incubation", "cooled": "Cooled",
+                        "released": "Released", "removed": "Removed"}
+_TRAY_STATUS_BY_LABEL = {lbl: val for val, lbl in TRAY_STATUS_OPTIONS}
+
+
+def tray_status_label(value) -> str:
+    return TRAY_STATUS_LABELS.get(value, value or "Incubation")
+
+
+def tray_status_value(label) -> str:
+    return _TRAY_STATUS_BY_LABEL.get(label, label)
+
 
 def _load_config() -> dict:
     """Read the small JSON config file that stores the user-chosen DB path."""

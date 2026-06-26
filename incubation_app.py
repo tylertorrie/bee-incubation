@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.7.4"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.7.5"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -632,8 +632,8 @@ class TrayDialog(ctk.CTkToplevel):
         row += 1
         _label(f, "Status", FONT_S, SUBTEXT).grid(
             row=row, column=0, sticky="w", padx=(4,8), pady=3)
-        self._status = _combo(f, ["active", "cooled", "released", "removed"], 230)
-        self._status.set("active")
+        self._status = _combo(f, [lbl for _v, lbl in db.TRAY_STATUS_OPTIONS], 230)
+        self._status.set("Incubation")
         self._status.grid(row=row, column=1, sticky="ew", padx=4, pady=3)
 
         row += 1
@@ -659,7 +659,7 @@ class TrayDialog(ctk.CTkToplevel):
             self._bat_cb.set(self.tray["batch_name"])
         for key, r in self._mrows.items():
             r.set(self.tray.get(key) or "")
-        self._status.set(self.tray.get("status") or "active")
+        self._status.set(db.tray_status_label(self.tray.get("status") or "active"))
         if self.tray.get("notes"):
             self._notes.insert("1.0", self.tray["notes"])
 
@@ -674,7 +674,7 @@ class TrayDialog(ctk.CTkToplevel):
             "sample_id":     self._smp_map.get(self._smp_cb.get()),
             "incubator_id":  self._inc_map.get(self._inc_cb.get()),
             "incubation_batch_id": self._bat_map.get(self._bat_cb.get()),
-            "status":        self._status.get(),
+            "status":        db.tray_status_value(self._status.get()),
             "notes":         self._notes.get("1.0", "end").strip(),
         }
         for key in ("in_date", "out_date"):
@@ -682,7 +682,7 @@ class TrayDialog(ctk.CTkToplevel):
         # Auto-release: if an out_date is set and status is still active, mark as released
         if data.get("out_date") and data.get("status") == "active":
             data["status"] = "released"
-            self._status.set("released")
+            self._status.set("Released")
         for key in ("weight_lbs", "volume_gal", "parasite_level_pct"):
             val = self._mrows[key].get()
             try:
@@ -1417,8 +1417,8 @@ class IncubationApp(ctk.CTk):
              fg=RED, hover="#B91C1C", text_color="white", width=110).pack(side="right", padx=6)
         _btn(hdr, "Set Status →", self._bulk_set_status,
              fg=BLUE, hover="#1D4ED8", text_color="white", width=110).pack(side="right", padx=(6, 0))
-        self._bulk_status = _combo(hdr, ["active", "cooled", "released", "removed"], 120)
-        self._bulk_status.set("released")
+        self._bulk_status = _combo(hdr, [lbl for _v, lbl in db.TRAY_STATUS_OPTIONS], 120)
+        self._bulk_status.set("Released")
         self._bulk_status.pack(side="right", padx=6)
         _btn(hdr, "QR Code", self._show_selected_qr,
              fg=CARD, hover=CARD2, width=90).pack(side="right", padx=6)
@@ -1446,7 +1446,7 @@ class IncubationApp(ctk.CTk):
         self._flt_inc.pack(side="left", padx=6, pady=6)
         self._flt_inc.configure(command=lambda _: self._refresh_trays())
 
-        self._flt_status = _combo(fbar, ["All", "active", "cooled", "released", "removed"], 130)
+        self._flt_status = _combo(fbar, ["All"] + [lbl for _v, lbl in db.TRAY_STATUS_OPTIONS], 130)
         self._flt_status.set("All")
         self._flt_status.pack(side="left", padx=6, pady=6)
         self._flt_status.configure(command=lambda _: self._refresh_trays())
@@ -1510,8 +1510,8 @@ class IncubationApp(ctk.CTk):
                 command=lambda c=cols.index(col): self._sort_tray_tree(c))
 
         inc_id = self._flt_inc_map.get(self._flt_inc.get())
-        status = self._flt_status.get()
-        status = None if status == "All" else status
+        _flt = self._flt_status.get()
+        status = None if _flt == "All" else db.tray_status_value(_flt)
 
         trays = db.get_trays(incubator_id=inc_id, status=status)
         # Build all row tuples first, then insert in one pass
@@ -1527,7 +1527,7 @@ class IncubationApp(ctk.CTk):
                 f"{t['parasite_level_pct']:.1f}%" if t.get("parasite_level_pct") else "—",
                 t.get("in_date") or "—",
                 t.get("out_date") or "—",
-                t.get("status") or "active",
+                db.tray_status_label(t.get("status") or "active"),
             ))
             for t in trays
         ]
@@ -3026,7 +3026,7 @@ class IncubationApp(ctk.CTk):
                 parent=self)
             return
 
-        new_status = self._bulk_status.get()
+        new_status = db.tray_status_value(self._bulk_status.get())
         tray_ids   = [int(iid) for iid in sel]
 
         out_date           = None
@@ -3057,7 +3057,8 @@ class IncubationApp(ctk.CTk):
         else:
             if not messagebox.askyesno(
                 "Change Status",
-                f"Set status to '{new_status}' for {len(tray_ids)} selected tray(s)?",
+                f"Set status to '{db.tray_status_label(new_status)}' "
+                f"for {len(tray_ids)} selected tray(s)?",
                 parent=self):
                 return
 
@@ -3066,7 +3067,7 @@ class IncubationApp(ctk.CTk):
         self._refresh_trays()
         self._refresh_alert_badge()
         messagebox.showinfo("Status Updated",
-            f"Updated {len(tray_ids)} tray(s) to '{new_status}'"
+            f"Updated {len(tray_ids)} tray(s) to '{db.tray_status_label(new_status)}'"
             + (f" with out date {out_date}." if out_date else "."), parent=self)
 
     def _delete_all_trays(self):

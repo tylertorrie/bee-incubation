@@ -60,7 +60,7 @@ _TRAY_HTML = """<!DOCTYPE html>
 
   <div class="card">
     <div class="card-title">Current Info</div>
-    <div class="info-row"><span>Status</span><span class="info-val">{{ tray.status or "active" }}</span></div>
+    <div class="info-row"><span>Status</span><span class="info-val">{{ status_label }}</span></div>
     <div class="info-row"><span>In Date</span><span class="info-val">{{ tray.in_date or "—" }}</span></div>
     <div class="info-row"><span>Out Date</span><span class="info-val">{{ tray.out_date or "—" }}</span></div>
   </div>
@@ -85,10 +85,9 @@ _TRAY_HTML = """<!DOCTYPE html>
     <div class="card">
       <div class="card-title">Status</div>
       <select name="status">
-        <option value="active"   {% if tray.status=='active'   %}selected{% endif %}>Active (in incubator)</option>
+        <option value="active"   {% if (tray.status or 'active')=='active' %}selected{% endif %}>Incubation</option>
         <option value="cooled"   {% if tray.status=='cooled'   %}selected{% endif %}>Cooled</option>
         <option value="released" {% if tray.status=='released' %}selected{% endif %}>Released</option>
-        <option value="removed"  {% if tray.status=='removed'  %}selected{% endif %}>Removed</option>
       </select>
       <div style="margin-top:10px">
         <label>Notes</label>
@@ -1341,7 +1340,7 @@ def _tray_results_body(query: str, matches: list) -> str:
         tn  = t.get("tray_number") or "—"
         sm  = t.get("sample_name") or "—"
         inc = t.get("incubator_name") or "—"
-        stt = t.get("status") or "active"
+        stt = db.tray_status_label(t.get("status") or "active")
         parts.append(
             f'<a class="trow" href="/tray/{t["id"]}">'
             f'<div><div class="tn">{tn}</div><div class="ts">{sm} · {inc}</div></div>'
@@ -1540,7 +1539,9 @@ def _make_flask_app():
         tray = db.get_tray_by_id(tray_id)
         if not tray:
             return "<h2 style='color:red;font-family:sans-serif;padding:20px'>Tray not found</h2>", 404
-        return render_template_string(_TRAY_HTML, tray=tray)
+        return render_template_string(
+            _TRAY_HTML, tray=tray,
+            status_label=db.tray_status_label(tray.get("status") or "active"))
 
     @app.route("/tray/<int:tray_id>/update", methods=["POST"])
     def tray_update(tray_id):
