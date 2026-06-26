@@ -586,7 +586,7 @@ def _inspection_record_html(r: dict, actions: bool = False) -> str:
         n_ti = idb.count_tray_inspections(rid)
         tray_link_html = (
             f'<a class="ibtn" style="margin-top:10px;background:#7C3AED" '
-            f'href="/m/inspection/{rid}">🐝 Tray inspections ({n_ti}) ›</a>'
+            f'href="/m/inspection/{rid}">📋 Open full report · {n_ti} tray inspection(s) ›</a>'
         )
         actions_html = (
             '<div style="display:flex;gap:8px;margin-top:8px">'
@@ -832,15 +832,17 @@ def _tray_insp_card(ti: dict, master_inc_id=None) -> str:
 
 
 def _inspection_report_body(insp_id: int, saved: bool = False) -> str:
-    """Master inspection report: summary + its tray inspections + add actions."""
+    """Full inspection report: the incubator inspection answers + its tray
+    inspections, all in one connected view."""
     import inspection_db as idb
     from datetime import datetime
     insp = idb.get_inspection_by_id(insp_id)
     if not insp:
         return ('<div class="topbar"><h1>Inspection</h1></div><div class="wrap">'
                 '<div class="card"><div class="soon">Not found.</div></div></div>')
+    inc_id   = insp["incubator_id"]
     inc = next((i for i in db.get_incubators(include_hidden=True)
-                if i["id"] == insp["incubator_id"]), None)
+                if i["id"] == inc_id), None)
     inc_name = inc["name"] if inc else "—"
     try:
         when = datetime.fromisoformat(insp["timestamp"]).strftime("%a %b %d  ·  %I:%M %p")
@@ -848,22 +850,73 @@ def _inspection_report_body(insp_id: int, saved: bool = False) -> str:
         when = (insp.get("timestamp") or "")[:16]
     period = _PERIOD_LABEL.get(insp.get("period"), "Manual entry")
 
-    tis = idb.get_tray_inspections(insp_id)
     parts = [
         '<div class="topbar">'
         f'<h1>🔍 {inc_name}</h1>'
-        f'<a href="/m/inspections/{insp["incubator_id"]}" '
+        f'<a href="/m/inspections/{inc_id}" '
         'style="color:#9CA3AF;text-decoration:none;font-size:.9rem">‹ Back</a>'
         '</div><div class="wrap">'
     ]
     if saved:
         parts.append('<div class="banner">✓ Saved</div>')
+
     parts.append(
         '<div class="card">'
+        f'<div class="cn">Inspection report</div>'
         f'<div class="meta">{when}</div>'
         f'<div class="period">● {period}</div>'
         '</div>'
-        '<div class="ml" style="margin:16px 4px 8px">Tray inspections</div>'
+    )
+
+    # ── Normal inspection answers ──
+    thermo = insp.get("thermometer_temp_c")
+    govee  = insp.get("govee_temp_c")
+    temp_rows = ""
+    if thermo is not None:
+        col = "#EF4444" if insp.get("temp_alert") else "#F3F4F6"
+        gtxt = f"  ·  Govee {govee:.1f}°C" if govee is not None else ""
+        temp_rows = (f'<div class="meta" style="color:{col}">'
+                     f'🌡 Thermometer {thermo:.1f}°C{gtxt}'
+                     + ('  ⚠ alert' if insp.get("temp_alert") else '') + '</div>')
+    else:
+        temp_rows = '<div class="meta">🌡 No thermometer reading</div>'
+
+    def _ok_row(label, ok):
+        c = "#22C55E" if ok else "#EF4444"
+        t = "✓ working" if ok else "✗ not working"
+        return f'<div class="meta" style="color:{c}">{label}: {t}</div>'
+
+    def _obs_row(label, yes, bad):
+        if yes:
+            c = "#EF4444" if bad else "#FBBF24"
+            return f'<div class="meta" style="color:{c}">{label}: Yes</div>'
+        return f'<div class="meta" style="color:#9CA3AF">{label}: No</div>'
+
+    checklist_html = (
+        _ok_row("Heat pumps",  insp.get("heat_pumps_ok"))
+        + _ok_row("Fans",         insp.get("fans_ok"))
+        + _ok_row("Black lights", insp.get("black_lights_ok"))
+        + _obs_row("Bees emerging",      insp.get("bees_emerging"),      bad=False)
+        + _obs_row("Parasites emerging", insp.get("parasites_emerging"), bad=True)
+    )
+    notes = (insp.get("notes") or "").strip()
+    notes_html = (f'<div class="meta" style="color:#CBD5E1;margin-top:6px">“{notes}”</div>'
+                  if notes else "")
+
+    parts.append(
+        '<div class="card">'
+        f'{temp_rows}'
+        '<div style="height:6px"></div>'
+        f'{checklist_html}{notes_html}'
+        f'<a class="ibtn" style="margin-top:12px;background:#263347" '
+        f'href="/m/inspect/{inc_id}/edit/{insp_id}">✎ Edit inspection answers</a>'
+        '</div>'
+    )
+
+    # ── Tray inspections (nested under this report) ──
+    tis = idb.get_tray_inspections(insp_id)
+    parts.append(
+        f'<div class="ml" style="margin:18px 4px 8px">Tray inspections ({len(tis)})</div>'
         '<a class="ibtn" style="background:#7C3AED" '
         f'href="/m/scan?next=/m/inspection/{insp_id}/tray-form">📷 Scan a tray to inspect</a>'
         f'<form method="GET" action="/m/inspection/{insp_id}/tray-form" class="fld" '
