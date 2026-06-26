@@ -901,13 +901,18 @@ def _inspection_page_body(inc: dict, insp: dict = None, saved: bool = False) -> 
 
     # ── Tray inspections (the spot you circled: between checklist and notes) ──
     parts.append('<div class="ml" style="margin:16px 4px 8px">Tray inspections</div>')
-    parts.append(
-        '<button form="insp" type="submit" name="action" value="add_tray" '
-        'class="ibtn" style="width:100%;border:none;cursor:pointer;background:#7C3AED">'
-        '➕ Add tray inspection (scan)</button>'
-    )
-    if not is_new:
+    if is_new:
+        # Nothing is created until the user explicitly saves, so adding trays
+        # (which must attach to a saved inspection) is unlocked after Save.
+        parts.append('<div class="meta" style="margin:6px 4px;color:#6B7280">'
+                     '💾 Save the inspection first, then you can add tray inspections.</div>')
+    else:
         tis = idb.get_tray_inspections(insp_id)
+        parts.append(
+            '<button form="insp" type="submit" name="action" value="add_tray" '
+            'class="ibtn" style="width:100%;border:none;cursor:pointer;background:#7C3AED">'
+            '➕ Add tray inspection (scan)</button>'
+        )
         parts.append(
             f'<form method="GET" action="/m/inspection/{insp_id}/tray-form" class="fld" '
             'style="margin-top:10px;margin-bottom:6px"><div style="display:flex;gap:8px">'
@@ -923,9 +928,6 @@ def _inspection_page_body(inc: dict, insp: dict = None, saved: bool = False) -> 
         else:
             parts.append('<div class="meta" style="margin:4px;color:#6B7280">'
                          'None added yet.</div>')
-    else:
-        parts.append('<div class="meta" style="margin:6px 4px;color:#6B7280">'
-                     'Save the inspection (or tap Add) to attach tray inspections.</div>')
 
     # Notes
     parts.append(
@@ -1115,6 +1117,15 @@ _SCAN_TEMPLATE = """
 <script>
 (function(){
   var NEXT = __NEXT__;
+  var qr = null;
+  // Always release the camera when leaving this page, even if the user backs
+  // out without scanning — otherwise the camera stays locked and later scans fail.
+  function release(){ try { if (qr) { qr.stop().catch(function(){}); qr = null; } } catch(e){} }
+  window.addEventListener('pagehide', release);
+  window.addEventListener('beforeunload', release);
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'hidden') release();
+  });
   if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     document.getElementById('fallback').style.display = 'block';
     return;
@@ -1123,7 +1134,7 @@ _SCAN_TEMPLATE = """
   var s = document.createElement('script');
   s.src = 'https://unpkg.com/html5-qrcode';
   s.onload = function(){
-    var qr = new Html5Qrcode("reader");
+    qr = new Html5Qrcode("reader");
     var done = false;
     function onScan(text){
       if (done) return;
