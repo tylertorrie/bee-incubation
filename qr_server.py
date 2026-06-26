@@ -66,6 +66,16 @@ _TRAY_HTML = """<!DOCTYPE html>
     <div class="info-row"><span>Out Date</span><span class="info-val">{{ tray.out_date or "—" }}</span></div>
   </div>
 
+  {% if sample_rows %}
+  <div class="card">
+    <div class="card-title">Sample — {{ tray.sample_name or "—" }}</div>
+    {% for label, value in sample_rows %}
+    <div class="info-row"><span>{{ label }}</span><span class="info-val">{{ value }}</span></div>
+    {% endfor %}
+    {% if sample_notes %}<div class="sub" style="margin-top:8px">“{{ sample_notes }}”</div>{% endif %}
+  </div>
+  {% endif %}
+
   <form id="f">
     <div class="card">
       <div class="card-title">Update Measurements</div>
@@ -185,6 +195,28 @@ body{background:#0F172A;color:#F3F4F6;font-family:system-ui,-apple-system,sans-s
 .bp{display:flex;gap:8px;margin-top:10px}
 .bp .pill{flex:1}
 """
+
+
+def _sample_detail_rows(sample) -> list:
+    """(label, value) rows for a sample's details — only fields that have a value."""
+    if not sample:
+        return []
+    def num(v, dec=0):
+        return f"{v:,.{dec}f}" if isinstance(v, (int, float)) else None
+    candidates = [
+        ("Live bees / lb",   num(sample.get("live_bees_per_lb"))),
+        ("Live bees / kg",   num(sample.get("live_bees_per_kg"))),
+        ("Total lbs",        num(sample.get("total_weight_lbs"), 1)),
+        ("Total kg",         num(sample.get("total_weight_kg"), 1)),
+        ("Total gal bees",   num(sample.get("total_volume_gal"), 1)),
+        ("Parasites",        num(sample.get("parasites"), 1)),
+        ("Chalkbrood",       num(sample.get("chalkbrood"), 1)),
+        ("Lbs for 2 gal",    num(sample.get("lbs_per_2gal"), 2)),
+        ("KG for 2 gal",     num(sample.get("kg_per_2gal"), 2)),
+        ("Total trays",      num(sample.get("total_trays"))),
+        ("Incubator space",  (sample.get("incubator_space") or None)),
+    ]
+    return [(lbl, val) for lbl, val in candidates if val not in (None, "")]
 
 
 def _nav_html(active: str) -> str:
@@ -1540,9 +1572,13 @@ def _make_flask_app():
         tray = db.get_tray_by_id(tray_id)
         if not tray:
             return "<h2 style='color:red;font-family:sans-serif;padding:20px'>Tray not found</h2>", 404
+        sample = db.get_sample(tray.get("sample_id"))
+        sample_rows = _sample_detail_rows(sample)
         return render_template_string(
             _TRAY_HTML, tray=tray,
-            status_label=db.tray_status_label(tray.get("status") or "active"))
+            status_label=db.tray_status_label(tray.get("status") or "active"),
+            sample_rows=sample_rows,
+            sample_notes=(sample.get("notes") if sample else "") or "")
 
     @app.route("/tray/<int:tray_id>/update", methods=["POST"])
     def tray_update(tray_id):

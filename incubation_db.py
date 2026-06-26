@@ -377,6 +377,14 @@ def get_samples() -> list:
                 ).fetchall()]
 
 
+def get_sample(sample_id: int) -> dict | None:
+    if not sample_id:
+        return None
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM samples WHERE id=?", (sample_id,)).fetchone()
+        return dict(row) if row else None
+
+
 def upsert_sample(data: dict) -> int:
     cols = ["name", "source", "lot_number", "xray_live_pct", "xray_parasite_pct",
             "xray_dead_pct", "total_volume_gal", "total_weight_lbs",
