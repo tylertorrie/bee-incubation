@@ -161,7 +161,9 @@ body{background:#0F172A;color:#F3F4F6;font-family:system-ui,-apple-system,sans-s
 .fld input[type=number],.fld input[type=text],.fld input[type=search],.fld textarea{
         width:100%;background:#374151;
         border:1px solid #4b5563;border-radius:8px;color:#F3F4F6;padding:12px;font-size:1.05rem}
-.fld input:focus,.fld textarea:focus{outline:2px solid #FBBF24;border-color:#FBBF24}
+.fld select{width:100%;background:#374151;border:1px solid #4b5563;border-radius:8px;
+        color:#F3F4F6;padding:12px;font-size:1.05rem}
+.fld input:focus,.fld textarea:focus,.fld select:focus{outline:2px solid #FBBF24;border-color:#FBBF24}
 .trow{display:flex;justify-content:space-between;align-items:center;background:#1F2937;
       border:1px solid #263347;border-radius:10px;padding:12px;margin-bottom:8px;
       text-decoration:none;color:inherit}
@@ -790,6 +792,36 @@ def _save_mobile_inspection(inc_id: int, form) -> Optional[str]:
     return new_id
 
 
+def _commit_pending_trays(insp_id: int, inc_id: int, pending_json: str):
+    """Create tray inspections from the browser-buffered JSON (on Save)."""
+    import json, inspection_db as idb
+    try:
+        items = json.loads(pending_json or "[]")
+    except Exception:
+        items = []
+    for it in items:
+        tid = it.get("tray_id")
+        tray = db.get_tray_by_id(int(tid)) if tid else None
+        if not tray:
+            continue
+        cells = it.get("cells_opened")
+        try:
+            cells = int(cells) if str(cells).strip() else None
+        except (ValueError, TypeError):
+            cells = None
+        idb.add_tray_inspection({
+            "inspection_id":  insp_id,
+            "tray_id":        tray["id"],
+            "tray_number":    tray.get("tray_number"),
+            "incubator_id":   inc_id,
+            "stack_position": (it.get("stack_position") or "").strip() or None,
+            "depth_position": (it.get("depth_position") or "").strip() or None,
+            "cells_opened":   cells,
+            "dev_stage":      (it.get("dev_stage") or "").strip() or None,
+            "notes":          (it.get("notes") or "").strip(),
+        })
+
+
 # ── Tray inspections (per-tray detail under an inspection) ─────────────────────
 
 def _tray_insp_card(ti: dict, master_inc_id=None) -> str:
@@ -818,6 +850,87 @@ def _tray_insp_card(ti: dict, master_inc_id=None) -> str:
         '</form></div>'
         '</div>'
     )
+
+
+_NEW_TRAY_JS = """
+<script>
+(function(){
+  var pending = [], sel = null, qr = null;
+  function release(){ try { if(qr){ qr.stop().catch(function(){}); qr=null; } } catch(e){} }
+  window.addEventListener('pagehide', release);
+  var panel = document.getElementById('addpanel');
+  function val(id){ return document.getElementById(id).value; }
+  function reset(){
+    release();
+    document.getElementById('treader').innerHTML='';
+    document.getElementById('tmatches').innerHTML='';
+    document.getElementById('trayfields').style.display='none';
+    document.getElementById('tq').value='';
+    sel=null;
+  }
+  function showFields(t){
+    sel=t;
+    document.getElementById('traylabel').textContent =
+      'Tray '+t.tray_number+(t.sample_name?(' · '+t.sample_name):'');
+    document.getElementById('trayfields').style.display='block';
+    document.getElementById('tmatches').innerHTML='';
+    release(); document.getElementById('treader').innerHTML='';
+  }
+  function resolve(q){
+    fetch('/m/api/find-tray?q='+encodeURIComponent(q),{cache:'no-store'})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        if(!d.matches || !d.matches.length){
+          document.getElementById('tmatches').innerHTML='<div class="meta" style="color:#EF4444">No tray found.</div>'; return; }
+        if(d.matches.length===1){ showFields(d.matches[0]); return; }
+        var h='<div class="meta" style="margin:6px 0">Pick a tray:</div>';
+        d.matches.forEach(function(m,i){
+          h+='<div class="trow" data-i="'+i+'"><div><div class="tn">'+m.tray_number+'</div><div class="ts">'+(m.sample_name||'—')+'</div></div></div>'; });
+        var box=document.getElementById('tmatches'); box.innerHTML=h;
+        box.querySelectorAll('.trow').forEach(function(e){ e.onclick=function(){ showFields(d.matches[+e.dataset.i]); }; });
+      }).catch(function(){ document.getElementById('tmatches').textContent='Lookup failed.'; });
+  }
+  document.getElementById('addbtn').onclick=function(){ panel.style.display='block'; };
+  document.getElementById('canceladd').onclick=function(){ reset(); panel.style.display='none'; };
+  document.getElementById('findbtn').onclick=function(){ var q=document.getElementById('tq').value.trim(); if(q) resolve(q); };
+  document.getElementById('scanbtn').onclick=function(){
+    if(!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      document.getElementById('tmatches').innerHTML='<div class="meta" style="color:#FBBF24">Camera needs HTTPS — use search instead.</div>'; return; }
+    var s=document.createElement('script'); s.src='https://unpkg.com/html5-qrcode';
+    s.onload=function(){
+      qr=new Html5Qrcode("treader");
+      qr.start({facingMode:"environment"},{fps:10,qrbox:200},function(txt){
+        var m=txt.match(/\\/tray\\/(\\d+)/); var q=m?m[1]:txt.trim(); release(); resolve(q);
+      },function(){}).catch(function(e){ document.getElementById('tmatches').textContent='Camera error: '+e; });
+    };
+    s.onerror=function(){ document.getElementById('tmatches').textContent='Could not load scanner.'; };
+    document.body.appendChild(s);
+  };
+  function render(){
+    var h='';
+    pending.forEach(function(p,i){
+      h+='<div class="card" style="padding:10px">'
+        +'<div style="font-weight:700;color:#FFD700">Tray '+p.tray_number+'</div>'
+        +'<div class="meta">📍 '+(p.stack_position||'—')+' / '+(p.depth_position||'—')+'</div>'
+        +'<div class="meta">🧬 '+(p.dev_stage||'—')+'</div>'
+        +(p.cells_opened?('<div class="meta">🥚 '+p.cells_opened+' cells</div>'):'')
+        +'<button type="button" class="rm" data-i="'+i+'" style="margin-top:6px;background:#7F1D1D;color:#fff;border:none;border-radius:8px;padding:6px 12px">Remove</button>'
+        +'</div>';
+    });
+    var pl=document.getElementById('pendinglist'); pl.innerHTML=h;
+    pl.querySelectorAll('.rm').forEach(function(e){ e.onclick=function(){ pending.splice(+e.dataset.i,1); render(); }; });
+    document.getElementById('pending_trays').value=JSON.stringify(pending);
+  }
+  document.getElementById('addtray').onclick=function(){
+    if(!sel) return;
+    pending.push({tray_id:sel.id, tray_number:sel.tray_number,
+      stack_position:val('ti_stack'), depth_position:val('ti_depth'),
+      dev_stage:val('ti_stage'), cells_opened:val('ti_cells'), notes:val('ti_notes')});
+    render(); reset(); panel.style.display='none';
+  };
+})();
+</script>
+"""
 
 
 def _inspection_page_body(inc: dict, insp: dict = None, saved: bool = False) -> str:
@@ -902,10 +1015,53 @@ def _inspection_page_body(inc: dict, insp: dict = None, saved: bool = False) -> 
     # ── Tray inspections (the spot you circled: between checklist and notes) ──
     parts.append('<div class="ml" style="margin:16px 4px 8px">Tray inspections</div>')
     if is_new:
-        # Nothing is created until the user explicitly saves, so adding trays
-        # (which must attach to a saved inspection) is unlocked after Save.
-        parts.append('<div class="meta" style="margin:6px 4px;color:#6B7280">'
-                     '💾 Save the inspection first, then you can add tray inspections.</div>')
+        # Buffer tray inspections in the browser; nothing is written until the
+        # user presses Save (then the inspection + all trays are created at once).
+        def _opts(options):
+            h = '<option value="">—</option>'
+            for o in options:
+                h += f'<option value="{o}">{o}</option>'
+            return h
+        parts.append(
+            '<div id="pendinglist"></div>'
+            '<button type="button" id="addbtn" class="ibtn" '
+            'style="background:#7C3AED;border:none;width:100%;cursor:pointer">'
+            '➕ Add tray inspection</button>'
+            '<div id="addpanel" class="card" style="display:none;margin-top:10px">'
+              '<div class="fld"><label>Find tray</label><div style="display:flex;gap:8px">'
+                '<input type="text" id="tq" placeholder="tray # (e.g. 123)" '
+                'autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" '
+                'style="flex:1">'
+                '<button type="button" id="findbtn" class="savebtn" '
+                'style="width:auto;margin-top:0;padding:12px 14px">Find</button>'
+              '</div></div>'
+              '<button type="button" id="scanbtn" class="ibtn" '
+              'style="background:#263347;border:none;width:100%;cursor:pointer">'
+              '📷 Scan instead</button>'
+              '<div id="treader" style="margin-top:8px"></div>'
+              '<div id="tmatches"></div>'
+              '<div id="trayfields" style="display:none">'
+                '<div class="meta" id="traylabel" '
+                'style="color:#FFD700;font-weight:700;margin:8px 0"></div>'
+                '<div class="fld"><label>Stack position</label>'
+                '<select id="ti_stack">' + _opts(idb.STACK_POSITIONS) + '</select></div>'
+                '<div class="fld"><label>Depth in unit</label>'
+                '<select id="ti_depth">' + _opts(idb.DEPTH_POSITIONS) + '</select></div>'
+                '<div class="fld"><label>Developmental stage</label>'
+                '<select id="ti_stage">' + _opts(idb.DEV_STAGES) + '</select></div>'
+                '<div class="fld"><label>Cells opened</label>'
+                '<input type="number" id="ti_cells" inputmode="numeric" placeholder="e.g. 12"></div>'
+                '<div class="fld"><label>Notes</label>'
+                '<textarea id="ti_notes" placeholder="Optional"></textarea></div>'
+                '<button type="button" id="addtray" class="savebtn">Add to inspection</button>'
+              '</div>'
+              '<button type="button" id="canceladd" class="ibtn" '
+              'style="background:#374151;border:none;width:100%;cursor:pointer;margin-top:8px">'
+              'Cancel</button>'
+            '</div>'
+            '<input type="hidden" name="pending_trays" id="pending_trays" form="insp">'
+        )
+        parts.append(_NEW_TRAY_JS)
     else:
         tis = idb.get_tray_inspections(insp_id)
         parts.append(
@@ -1423,6 +1579,15 @@ def _make_flask_app():
     def mobile_dashboard_data():
         return jsonify(_dashboard_data())
 
+    @app.route("/m/api/find-tray")
+    def mobile_api_find_tray():
+        q = (request.args.get("q") or "").strip()
+        ms = db.find_trays(q) if q else []
+        return jsonify({"matches": [
+            {"id": m["id"], "tray_number": m["tray_number"],
+             "sample_name": m.get("sample_name"),
+             "incubator_name": m.get("incubator_name")} for m in ms]})
+
     @app.route("/m/incubator/<int:inc_id>")
     def mobile_incubator_detail(inc_id):
         try:
@@ -1462,12 +1627,12 @@ def _make_flask_app():
     def mobile_inspect_save(inc_id):
         from flask import redirect
         new_id = _save_mobile_inspection(inc_id, request.form)
-        if _on_update:
-            _on_update(None)
         if not new_id:
             return redirect(f"/m/inspections/{inc_id}?saved=1")
-        if request.form.get("action") == "add_tray":
-            return redirect(f"/m/scan?next=/m/inspection/{new_id}/tray-form")
+        # Commit any tray inspections the user buffered in the browser
+        _commit_pending_trays(new_id, inc_id, request.form.get("pending_trays"))
+        if _on_update:
+            _on_update(None)
         return redirect(f"/m/inspection/{new_id}?saved=1")
 
     @app.route("/m/inspection/<int:insp_id>")
