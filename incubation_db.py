@@ -227,6 +227,8 @@ def init_db():
         conn.execute("UPDATE temp_humidity_readings SET is_downsampled=0 WHERE is_downsampled IS NULL")
         # Key used to suppress repeated/duplicate alerts
         _safe_add_column(conn, "alerts", "dedup_key", "TEXT")
+        # When a tray entered cooling (for cool-down duration tracking)
+        _safe_add_column(conn, "trays", "cool_date", "TEXT")
 
         # Backfill NULLs left by the migration (rows that existed before the column was added)
         conn.execute("UPDATE incubators SET is_hidden=0           WHERE is_hidden IS NULL")
@@ -565,7 +567,7 @@ def release_tray(tray_number: str, out_date: str = None, notes_append: str = "")
 def upsert_tray(data: dict) -> int:
     cols = ["tray_number", "sample_id", "incubation_batch_id", "incubator_id",
             "weight_lbs", "live_count", "parasite_level_pct", "volume_gal",
-            "in_date", "out_date", "status", "notes"]
+            "in_date", "out_date", "cool_date", "status", "notes"]
     with get_conn() as conn:
         # Explicit ID — always update that exact row
         if data.get("id"):
@@ -601,6 +603,29 @@ def upsert_tray(data: dict) -> int:
 def delete_tray(tray_id: int):
     with get_conn() as conn:
         conn.execute("DELETE FROM trays WHERE id=?", (tray_id,))
+
+
+def count_active_trays(incubator_id: int) -> int:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM trays WHERE incubator_id=? AND status='active'",
+            (incubator_id,)).fetchone()[0]
+
+
+def cool_trays(incubator_id: int, cool_date: str = None) -> int:
+    """Move an incubator's active (in-incubation) trays to 'cooled' and stamp
+    cool_date. Returns the number moved."""
+    from datetime import date as _date
+    cd = cool_date or _date.today().isoformat()
+    with get_conn() as conn:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM trays WHERE incubator_id=? AND status='active'",
+            (incubator_id,)).fetchone()[0]
+        conn.execute(
+            "UPDATE trays SET status='cooled', cool_date=COALESCE(cool_date, ?) "
+            "WHERE incubator_id=? AND status='active'",
+            (cd, incubator_id))
+        return n
 
 
 def set_trays_status(tray_ids: list, status: str, out_date: str = None,

@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.7.5"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.8.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -562,7 +562,7 @@ class TrayDialog(ctk.CTkToplevel):
         self.tray = tray or {}
         self.preselect_inc = incubator_id
         self.title("Edit Tray" if tray else "Add Tray")
-        self.geometry("460x640")
+        self.geometry("460x680")
         self.resizable(False, False)
         self.grab_set()
         self._build()
@@ -621,6 +621,7 @@ class TrayDialog(ctk.CTkToplevel):
             ("Live Count",        "live_count",         ""),
             ("Parasite Level (%)", "parasite_level_pct",""),
             ("In Date",           "in_date",            "YYYY-MM-DD"),
+            ("Cool Date",         "cool_date",          "YYYY-MM-DD"),
             ("Out Date",          "out_date",           "YYYY-MM-DD"),
         ]
         self._mrows = {}
@@ -677,7 +678,7 @@ class TrayDialog(ctk.CTkToplevel):
             "status":        db.tray_status_value(self._status.get()),
             "notes":         self._notes.get("1.0", "end").strip(),
         }
-        for key in ("in_date", "out_date"):
+        for key in ("in_date", "cool_date", "out_date"):
             data[key] = self._mrows[key].get() or None
         # Auto-release: if an out_date is set and status is still active, mark as released
         if data.get("out_date") and data.get("status") == "active":
@@ -2289,8 +2290,11 @@ class IncubationApp(ctk.CTk):
         _update_range_lbl(calc.TEMP_MODES.get(_det_mode_key, calc.TEMP_MODES["incubation"]))
 
         def _on_detail_mode(label, iid=fresh["id"]):
-            key = calc._MODE_BY_LABEL.get(label, "incubation")
+            key  = calc._MODE_BY_LABEL.get(label, "incubation")
+            prev = next((x for x in db.get_incubators(include_hidden=True)
+                         if x["id"] == iid), {}).get("temp_mode", "incubation")
             db.set_incubator_temp_mode(iid, key)
+            self._maybe_cool_trays(iid, key, prev)
             _update_range_lbl(calc.TEMP_MODES[key])
             self._refresh_current()
 
@@ -3015,6 +3019,24 @@ class IncubationApp(ctk.CTk):
     def _open_tray_dialog(self, tray: dict = None, incubator_id: int = None):
         TrayDialog(self, tray, incubator_id,
                    on_save=lambda: self._refresh_current())
+
+    def _maybe_cool_trays(self, inc_id: int, new_key: str, prev_key: str):
+        """When an incubator is switched to Cool Storage, offer to move its
+        in-incubation trays to 'Cooled' and start their cool-down timer."""
+        if new_key != "cool_storage" or prev_key == "cool_storage":
+            return
+        n = db.count_active_trays(inc_id)
+        if not n:
+            return
+        if messagebox.askyesno(
+            "Move trays to Cooled?",
+            f"This incubator was switched to Cool Storage.\n\n"
+            f"Move its {n} tray(s) currently in incubation to 'Cooled' and "
+            f"start their cool-down timer (today's date)?",
+            parent=self):
+            moved = db.cool_trays(inc_id)
+            messagebox.showinfo("Trays Cooled",
+                f"Moved {moved} tray(s) to Cooled.", parent=self)
 
     def _bulk_set_status(self):
         """Change status on all currently selected trays in the Trays tab."""
