@@ -578,16 +578,22 @@ def _inspection_record_html(r: dict, actions: bool = False) -> str:
     notes_html = (f'<div class="meta" style="margin-top:6px;color:#CBD5E1">“{notes}”</div>'
                   if notes else '')
 
-    actions_html = ''
+    tray_link_html = actions_html = ''
     if actions:
+        import inspection_db as idb
         iid  = r.get("incubator_id")
         rid  = r.get("id")
+        n_ti = idb.count_tray_inspections(rid)
+        tray_link_html = (
+            f'<a class="ibtn" style="margin-top:10px;background:#7C3AED" '
+            f'href="/m/inspection/{rid}">🐝 Tray inspections ({n_ti}) ›</a>'
+        )
         actions_html = (
-            '<div style="display:flex;gap:8px;margin-top:10px">'
+            '<div style="display:flex;gap:8px;margin-top:8px">'
             f'<a class="ibtn" style="flex:1;margin-top:0;padding:9px" '
             f'href="/m/inspect/{iid}/edit/{rid}">✎ Edit</a>'
             f'<form method="POST" action="/m/inspection/{rid}/delete" style="flex:1" '
-            f'onsubmit="return confirm(\'Delete this inspection?\')">'
+            f'onsubmit="return confirm(\'Delete this inspection and its tray inspections?\')">'
             f'<button type="submit" style="width:100%;background:#7F1D1D;color:#fff;'
             f'border:none;border-radius:10px;padding:9px;font-weight:700">🗑 Delete</button>'
             '</form>'
@@ -599,7 +605,7 @@ def _inspection_record_html(r: dict, actions: bool = False) -> str:
         f'<div style="display:flex;justify-content:space-between;align-items:baseline">'
         f'<span style="font-weight:700;color:#F3F4F6">{icon} {r.get("incubator_name") or "—"}</span>'
         f'<span class="meta">{when}</span></div>'
-        + temp_html + flag_html + notes_html + actions_html +
+        + temp_html + flag_html + notes_html + tray_link_html + actions_html +
         '</div>'
     )
 
@@ -779,7 +785,7 @@ def _save_mobile_inspection(inc_id: int, form) -> Optional[str]:
     for key, _label, _default in _CHECKLIST:
         data[key] = key in form
 
-    idb.save_inspection(data)
+    new_id = idb.save_inspection(data)
 
     if temp_alert:
         try:
@@ -792,7 +798,145 @@ def _save_mobile_inspection(inc_id: int, form) -> Optional[str]:
             )
         except Exception:
             pass
-    return inc["name"]
+    return new_id
+
+
+# ── Tray inspections (per-tray detail under an inspection) ─────────────────────
+
+def _tray_insp_card(ti: dict, master_inc_id=None) -> str:
+    """One saved tray-inspection card with edit/delete."""
+    loc = " / ".join(x for x in (ti.get("stack_position"), ti.get("depth_position")) if x) or "—"
+    cells = ti.get("cells_opened")
+    cells_txt = f"{cells} cells opened" if cells is not None else ""
+    stage = ti.get("dev_stage") or "—"
+    notes = (ti.get("notes") or "").strip()
+    notes_html = (f'<div class="meta" style="color:#CBD5E1;margin-top:4px">“{notes}”</div>'
+                  if notes else "")
+    return (
+        '<div class="card" style="padding:12px">'
+        f'<div style="font-weight:700;color:#FFD700">Tray {ti.get("tray_number") or "—"}</div>'
+        f'<div class="meta" style="margin-top:4px">📍 {loc}</div>'
+        f'<div class="meta">🧬 {stage}</div>'
+        + (f'<div class="meta">🥚 {cells_txt}</div>' if cells_txt else "")
+        + notes_html +
+        '<div style="display:flex;gap:8px;margin-top:10px">'
+        f'<a class="ibtn" style="flex:1;margin-top:0;padding:9px" '
+        f'href="/m/tray-inspection/{ti["id"]}/edit">✎ Edit</a>'
+        f'<form method="POST" action="/m/tray-inspection/{ti["id"]}/delete" style="flex:1" '
+        f'onsubmit="return confirm(\'Delete this tray inspection?\')">'
+        f'<button type="submit" style="width:100%;background:#7F1D1D;color:#fff;'
+        f'border:none;border-radius:10px;padding:9px;font-weight:700">🗑 Delete</button>'
+        '</form></div>'
+        '</div>'
+    )
+
+
+def _inspection_report_body(insp_id: int, saved: bool = False) -> str:
+    """Master inspection report: summary + its tray inspections + add actions."""
+    import inspection_db as idb
+    from datetime import datetime
+    insp = idb.get_inspection_by_id(insp_id)
+    if not insp:
+        return ('<div class="topbar"><h1>Inspection</h1></div><div class="wrap">'
+                '<div class="card"><div class="soon">Not found.</div></div></div>')
+    inc = next((i for i in db.get_incubators(include_hidden=True)
+                if i["id"] == insp["incubator_id"]), None)
+    inc_name = inc["name"] if inc else "—"
+    try:
+        when = datetime.fromisoformat(insp["timestamp"]).strftime("%a %b %d  ·  %I:%M %p")
+    except Exception:
+        when = (insp.get("timestamp") or "")[:16]
+    period = _PERIOD_LABEL.get(insp.get("period"), "Manual entry")
+
+    tis = idb.get_tray_inspections(insp_id)
+    parts = [
+        '<div class="topbar">'
+        f'<h1>🔍 {inc_name}</h1>'
+        f'<a href="/m/inspections/{insp["incubator_id"]}" '
+        'style="color:#9CA3AF;text-decoration:none;font-size:.9rem">‹ Back</a>'
+        '</div><div class="wrap">'
+    ]
+    if saved:
+        parts.append('<div class="banner">✓ Saved</div>')
+    parts.append(
+        '<div class="card">'
+        f'<div class="meta">{when}</div>'
+        f'<div class="period">● {period}</div>'
+        '</div>'
+        '<div class="ml" style="margin:16px 4px 8px">Tray inspections</div>'
+        '<a class="ibtn" style="background:#7C3AED" '
+        f'href="/m/scan?next=/m/inspection/{insp_id}/tray-form">📷 Scan a tray to inspect</a>'
+        f'<form method="GET" action="/m/inspection/{insp_id}/tray-form" class="fld" '
+        'style="margin-top:10px;margin-bottom:14px">'
+        '<div style="display:flex;gap:8px">'
+        '<input type="text" name="q" placeholder="or enter tray # (e.g. 123)" '
+        'autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" '
+        'style="flex:1">'
+        '<button class="savebtn" style="width:auto;margin-top:0;padding:12px 18px" '
+        'type="submit">Go</button></div></form>'
+    )
+    if tis:
+        for ti in tis:
+            parts.append(_tray_insp_card(ti))
+    else:
+        parts.append('<div class="card"><div class="soon">'
+                     'No tray inspections yet. Scan or enter a tray above.</div></div>')
+    parts.append('</div>')
+    return "".join(parts)
+
+
+def _tray_insp_form_body(insp_id: int, tray: dict, existing: dict = None) -> str:
+    """Form to add/edit a tray inspection (location, cells, stage, notes)."""
+    import inspection_db as idb
+    is_edit = existing is not None
+    action  = (f'/m/tray-inspection/{existing["id"]}/edit' if is_edit
+               else f'/m/inspection/{insp_id}/tray-form?tray={tray["id"]}')
+    title   = "✎ Edit Tray Inspection" if is_edit else "🐝 Tray Inspection"
+    btn     = "💾  Update" if is_edit else "💾  Save tray inspection"
+
+    cur = existing or {}
+    def _sel(name, options, current):
+        opts = '<option value="">—</option>'
+        for o in options:
+            s = " selected" if o == current else ""
+            opts += f'<option value="{o}"{s}>{o}</option>'
+        return (f'<select name="{name}" style="width:100%;background:#374151;'
+                f'border:1px solid #4b5563;border-radius:8px;color:#F3F4F6;'
+                f'padding:12px;font-size:1.05rem">{opts}</select>')
+
+    cells_val = cur.get("cells_opened")
+    cells_val = "" if cells_val is None else cells_val
+    notes_val = cur.get("notes") or ""
+
+    return (
+        f'<div class="topbar"><h1>{title}</h1></div><div class="wrap">'
+        '<div class="card">'
+        f'<div class="cn">Tray {tray.get("tray_number") or "—"}</div>'
+        f'<div class="meta">{tray.get("sample_name") or "—"} · '
+        f'{tray.get("incubator_name") or "—"}</div>'
+        '</div>'
+        f'<form method="POST" action="{action}">'
+        '<div class="card">'
+        '<div class="fld"><label>Stack position</label>'
+        + _sel("stack_position", idb.STACK_POSITIONS, cur.get("stack_position")) + '</div>'
+        '<div class="fld"><label>Depth in unit</label>'
+        + _sel("depth_position", idb.DEPTH_POSITIONS, cur.get("depth_position")) + '</div>'
+        '</div>'
+        '<div class="card">'
+        '<div class="fld"><label>Developmental stage</label>'
+        + _sel("dev_stage", idb.DEV_STAGES, cur.get("dev_stage")) + '</div>'
+        '<div class="fld"><label>Bee cells opened (count)</label>'
+        f'<input type="number" name="cells_opened" inputmode="numeric" '
+        f'placeholder="e.g. 12" value="{cells_val}"></div>'
+        '</div>'
+        '<div class="card">'
+        '<div class="fld"><label>Notes</label>'
+        f'<textarea name="notes" placeholder="Optional notes…">{notes_val}</textarea></div>'
+        '</div>'
+        f'<button class="savebtn" type="submit">{btn}</button>'
+        '</form>'
+        '</div>'
+    )
 
 
 def _update_mobile_inspection(insp_id: int, form) -> Optional[int]:
@@ -865,7 +1009,7 @@ def _trays_home_body(notfound: str = None) -> str:
     return "".join(parts)
 
 
-_SCAN_BODY = """
+_SCAN_TEMPLATE = """
 <div class="topbar"><h1>📷 Scan Tray</h1>
 <a href="/m/trays" style="color:#9CA3AF;text-decoration:none;font-size:.9rem">‹ Back</a></div>
 <div class="wrap">
@@ -888,6 +1032,7 @@ _SCAN_BODY = """
 </div>
 <script>
 (function(){
+  var NEXT = __NEXT__;
   if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     document.getElementById('fallback').style.display = 'block';
     return;
@@ -904,10 +1049,13 @@ _SCAN_BODY = """
       document.getElementById('scanmsg').textContent = 'Found code — opening…';
       var dest;
       var m = text.match(/\\/tray\\/(\\d+)/);
-      if (m){
-        dest = '/tray/' + m[1];                       // QR holds a tray URL
+      if (NEXT){
+        var sep = NEXT.indexOf('?') >= 0 ? '&' : '?';
+        dest = m ? (NEXT + sep + 'tray=' + m[1])
+                 : (NEXT + sep + 'q=' + encodeURIComponent(text.trim()));
       } else {
-        dest = '/m/tray-lookup?q=' + encodeURIComponent(text.trim());  // bare number/text
+        dest = m ? ('/tray/' + m[1])
+                 : ('/m/tray-lookup?q=' + encodeURIComponent(text.trim()));
       }
       qr.stop().then(function(){ window.location = dest; })
                 .catch(function(){ window.location = dest; });
@@ -925,6 +1073,13 @@ _SCAN_BODY = """
 })();
 </script>
 """
+
+
+def _scan_body(nxt: str = "") -> str:
+    import json
+    if not (nxt and nxt.startswith("/")):
+        nxt = ""
+    return _SCAN_TEMPLATE.replace("__NEXT__", json.dumps(nxt))
 
 
 def _tray_results_body(query: str, matches: list) -> str:
@@ -1218,10 +1373,126 @@ def _make_flask_app():
     @app.route("/m/inspect/<int:inc_id>", methods=["POST"])
     def mobile_inspect_save(inc_id):
         from flask import redirect
-        _save_mobile_inspection(inc_id, request.form)
+        new_id = _save_mobile_inspection(inc_id, request.form)
         if _on_update:
             _on_update(None)
+        if new_id:
+            # Land on the report page so trays can be inspected under it
+            return redirect(f"/m/inspection/{new_id}?saved=1")
         return redirect(f"/m/inspections/{inc_id}?saved=1")
+
+    @app.route("/m/inspection/<int:insp_id>")
+    def mobile_inspection_report(insp_id):
+        saved = request.args.get("saved")
+        return _mobile_page("Inspection",
+                            _inspection_report_body(insp_id, saved=bool(saved)),
+                            active="inspect")
+
+    @app.route("/m/inspection/<int:insp_id>/tray-form", methods=["GET"])
+    def mobile_tray_insp_form(insp_id):
+        import inspection_db as idb
+        if not idb.get_inspection_by_id(insp_id):
+            return "<h2 style='color:red;padding:20px;font-family:sans-serif'>Inspection not found</h2>", 404
+        # Resolve the tray from ?tray=<id> or ?q=<text>
+        tid = request.args.get("tray", type=int)
+        tray = None
+        if tid:
+            tray = db.get_tray_by_id(tid)
+        else:
+            q = (request.args.get("q") or "").strip()
+            matches = db.find_trays(q) if q else []
+            if len(matches) == 1:
+                tray = matches[0]
+            elif len(matches) > 1:
+                # Let the user pick which tray, then come back here
+                body = ['<div class="topbar"><h1>Pick a tray</h1>'
+                        f'<a href="/m/inspection/{insp_id}" '
+                        'style="color:#9CA3AF;text-decoration:none;font-size:.9rem">‹ Back</a>'
+                        '</div><div class="wrap">'
+                        f'<div class="meta" style="margin:0 4px 10px">{len(matches)} matches</div>']
+                for m in matches:
+                    body.append(
+                        f'<a class="trow" href="/m/inspection/{insp_id}/tray-form?tray={m["id"]}">'
+                        f'<div><div class="tn">{m.get("tray_number")}</div>'
+                        f'<div class="ts">{m.get("sample_name") or "—"}</div></div></a>')
+                body.append('</div>')
+                return _mobile_page("Pick a tray", "".join(body), active="inspect")
+        if not tray:
+            return _mobile_page("Inspection",
+                                _inspection_report_body(insp_id), active="inspect")
+        return _mobile_page("Tray Inspection",
+                            _tray_insp_form_body(insp_id, tray), active="inspect")
+
+    @app.route("/m/inspection/<int:insp_id>/tray-form", methods=["POST"])
+    def mobile_tray_insp_save(insp_id):
+        from flask import redirect
+        import inspection_db as idb
+        insp = idb.get_inspection_by_id(insp_id)
+        tid  = request.args.get("tray", type=int)
+        tray = db.get_tray_by_id(tid) if tid else None
+        if not insp or not tray:
+            return redirect(f"/m/inspection/{insp_id}")
+        cells = (request.form.get("cells_opened") or "").strip()
+        try:
+            cells = int(cells) if cells else None
+        except ValueError:
+            cells = None
+        idb.add_tray_inspection({
+            "inspection_id":  insp_id,
+            "tray_id":        tray["id"],
+            "tray_number":    tray.get("tray_number"),
+            "incubator_id":   insp.get("incubator_id"),
+            "stack_position": (request.form.get("stack_position") or "").strip() or None,
+            "depth_position": (request.form.get("depth_position") or "").strip() or None,
+            "cells_opened":   cells,
+            "dev_stage":      (request.form.get("dev_stage") or "").strip() or None,
+            "notes":          (request.form.get("notes") or "").strip(),
+        })
+        if _on_update:
+            _on_update(None)
+        return redirect(f"/m/inspection/{insp_id}?saved=1")
+
+    @app.route("/m/tray-inspection/<int:ti_id>/edit", methods=["GET", "POST"])
+    def mobile_tray_insp_edit(ti_id):
+        from flask import redirect
+        import inspection_db as idb
+        ti = idb.get_tray_inspection_by_id(ti_id)
+        if not ti:
+            return redirect("/m/inspections")
+        if request.method == "POST":
+            cells = (request.form.get("cells_opened") or "").strip()
+            try:
+                cells = int(cells) if cells else None
+            except ValueError:
+                cells = None
+            idb.update_tray_inspection(ti_id, {
+                "stack_position": (request.form.get("stack_position") or "").strip() or None,
+                "depth_position": (request.form.get("depth_position") or "").strip() or None,
+                "cells_opened":   cells,
+                "dev_stage":      (request.form.get("dev_stage") or "").strip() or None,
+                "notes":          (request.form.get("notes") or "").strip(),
+            })
+            if _on_update:
+                _on_update(None)
+            return redirect(f"/m/inspection/{ti['inspection_id']}?saved=1")
+        tray = db.get_tray_by_id(ti["tray_id"]) if ti.get("tray_id") else None
+        if not tray:
+            tray = {"tray_number": ti.get("tray_number"), "id": ti.get("tray_id")}
+        return _mobile_page("Edit Tray Inspection",
+                            _tray_insp_form_body(ti["inspection_id"], tray, existing=ti),
+                            active="inspect")
+
+    @app.route("/m/tray-inspection/<int:ti_id>/delete", methods=["POST"])
+    def mobile_tray_insp_delete(ti_id):
+        from flask import redirect
+        import inspection_db as idb
+        ti = idb.get_tray_inspection_by_id(ti_id)
+        insp_id = ti["inspection_id"] if ti else None
+        if ti:
+            idb.delete_tray_inspection(ti_id)
+        if _on_update:
+            _on_update(None)
+        return redirect(f"/m/inspection/{insp_id}" if insp_id else "/m/inspections")
 
     @app.route("/m/inspect/<int:inc_id>/edit/<int:insp_id>", methods=["GET"])
     def mobile_inspect_edit_form(inc_id, insp_id):
@@ -1271,7 +1542,8 @@ def _make_flask_app():
 
     @app.route("/m/scan")
     def mobile_scan():
-        return _mobile_page("Scan Tray", _SCAN_BODY, active="trays")
+        nxt = (request.args.get("next") or "").strip()
+        return _mobile_page("Scan Tray", _scan_body(nxt), active="trays")
 
     @app.route("/m/tray-lookup")
     def mobile_tray_lookup():

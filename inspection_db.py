@@ -22,11 +22,26 @@ EVENING_END   = 22    # exclusive  (21:59 is last valid minute)
 
 TEMP_ALERT_THRESHOLD = 5.0   # °C — alert if |thermo - govee| > this
 
+# Tray-inspection vocabularies (used by desktop + mobile forms)
+DEV_STAGES = [
+    "Day 1 — Worm/Larva",
+    "Day 3 — Whitening",
+    "Day 5 — Nonsymmetrical",
+    "Day 8–9 — Pupal",
+    "Day 10 — Pink-Eyed",
+    "Day 13 — Male dark eye / Female red eye",
+    "Day 14–15 — Male fully dark / Female darkening",
+    "Day 17–18 — Male emergence",
+    "Day 20 — Female emergence",
+]
+STACK_POSITIONS = ["Top", "Middle", "Bottom"]
+DEPTH_POSITIONS = ["Front", "Middle", "Back"]
+
 
 # ── Table init ────────────────────────────────────────────────────────────────
 
 def init_inspection_tables():
-    """Create inspections table if it doesn't exist (idempotent)."""
+    """Create inspection tables if they don't exist (idempotent)."""
     with _db.get_conn() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS inspections (
@@ -47,6 +62,24 @@ def init_inspection_tables():
             );
             CREATE INDEX IF NOT EXISTS idx_inspections_inc_ts
                 ON inspections (incubator_id, timestamp DESC);
+
+            CREATE TABLE IF NOT EXISTS tray_inspections (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                inspection_id   INTEGER NOT NULL REFERENCES inspections(id) ON DELETE CASCADE,
+                tray_id         INTEGER REFERENCES trays(id) ON DELETE SET NULL,
+                tray_number     TEXT,
+                incubator_id    INTEGER,
+                timestamp       TEXT    NOT NULL,
+                stack_position  TEXT,
+                depth_position  TEXT,
+                cells_opened    INTEGER,
+                dev_stage       TEXT,
+                notes           TEXT    DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_tray_insp_inspection
+                ON tray_inspections (inspection_id);
+            CREATE INDEX IF NOT EXISTS idx_tray_insp_traynum
+                ON tray_inspections (tray_number);
         """)
 
 
@@ -192,3 +225,86 @@ def update_inspection(inspection_id: int, data: dict):
 def delete_inspection(inspection_id: int):
     with _db.get_conn() as conn:
         conn.execute("DELETE FROM inspections WHERE id=?", (inspection_id,))
+
+
+# ── Tray inspections (per-tray detail, linked to an inspection) ────────────────
+
+def add_tray_inspection(data: dict) -> int:
+    """Insert one tray inspection. Requires inspection_id. Returns new row id."""
+    now = data.get("timestamp") or datetime.now().isoformat()
+    with _db.get_conn() as conn:
+        cur = conn.execute("""
+            INSERT INTO tray_inspections
+              (inspection_id, tray_id, tray_number, incubator_id, timestamp,
+               stack_position, depth_position, cells_opened, dev_stage, notes)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (
+            data["inspection_id"],
+            data.get("tray_id"),
+            data.get("tray_number"),
+            data.get("incubator_id"),
+            now,
+            data.get("stack_position"),
+            data.get("depth_position"),
+            data.get("cells_opened"),
+            data.get("dev_stage"),
+            data.get("notes", ""),
+        ))
+        return cur.lastrowid
+
+
+def update_tray_inspection(ti_id: int, data: dict):
+    with _db.get_conn() as conn:
+        conn.execute("""
+            UPDATE tray_inspections SET
+                stack_position=?, depth_position=?, cells_opened=?,
+                dev_stage=?, notes=?
+            WHERE id=?
+        """, (
+            data.get("stack_position"),
+            data.get("depth_position"),
+            data.get("cells_opened"),
+            data.get("dev_stage"),
+            data.get("notes", ""),
+            ti_id,
+        ))
+
+
+def get_tray_inspection_by_id(ti_id: int) -> dict | None:
+    with _db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM tray_inspections WHERE id=?", (ti_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_tray_inspections(inspection_id: int) -> list:
+    """All tray inspections under one master inspection, newest first."""
+    with _db.get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM tray_inspections WHERE inspection_id=? "
+            "ORDER BY id DESC", (inspection_id,)).fetchall()]
+
+
+def get_tray_inspections_for_tray(tray_number: str) -> list:
+    """Full inspection history for one tray number, newest first."""
+    with _db.get_conn() as conn:
+        return [dict(r) for r in conn.execute("""
+            SELECT ti.*, i.timestamp AS inspection_ts, inc.name AS incubator_name
+            FROM tray_inspections ti
+            LEFT JOIN inspections i  ON ti.inspection_id = i.id
+            LEFT JOIN incubators  inc ON ti.incubator_id  = inc.id
+            WHERE ti.tray_number = ? COLLATE NOCASE
+            ORDER BY ti.timestamp DESC
+        """, (tray_number,)).fetchall()]
+
+
+def count_tray_inspections(inspection_id: int) -> int:
+    with _db.get_conn() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM tray_inspections WHERE inspection_id=?",
+            (inspection_id,)).fetchone()[0]
+
+
+def delete_tray_inspection(ti_id: int):
+    with _db.get_conn() as conn:
+        conn.execute("DELETE FROM tray_inspections WHERE id=?", (ti_id,))
