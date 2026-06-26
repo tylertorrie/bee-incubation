@@ -62,6 +62,20 @@ or `C:\Users\<user>\My Drive\...`) via `incubation_config.json`.
 - Inspection windows: Morning 6:00–9:59, Evening 16:00–21:59.
 - Updating code across machines: `git pull` to get changes, and
   `git add … && git commit && git push` to share them. The repo is public.
+  (The app also auto-syncs every 5 min, and the host serves the mobile web
+  app publicly over HTTPS via Tailscale Funnel.)
+
+## Versioning (bump on every push)
+
+`APP_VERSION` near the top of `incubation_app.py` is shown in the desktop
+sidebar (with the short git hash). **Bump it with every update**, using
+semantic versioning `MAJOR.MINOR.PATCH`:
+
+- **PATCH** (`1.6.0 → 1.6.1`) — small fixes, tweaks, copy/UI adjustments.
+- **MINOR** (`1.6.1 → 1.7.0`) — new features (a new page, a new capability).
+- **MAJOR** (`1.6.0 → 2.0.0`) — big releases or changes to how things fundamentally work.
+
+Include the version bump in the same commit as the change it describes.
 
 ## When working on this app
 
