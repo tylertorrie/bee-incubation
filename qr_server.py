@@ -459,11 +459,11 @@ def _incubator_detail_body(inc_id: int, hours: int) -> str:
     readings = db.get_readings_hours(inc_id, hours)
     chart    = _svg_chart(readings, unit, t_min, t_max)
 
-    ranges = [("24H", 24), ("7D", 24 * 7), ("30D", 24 * 30)]
+    ranges = [("1H", 1), ("6H", 6), ("24H", 24), ("7D", 24 * 7), ("30D", 24 * 30)]
     rbtns = "".join(
         f'<a href="/m/incubator/{inc_id}?h={h}" '
-        f'style="flex:1;text-align:center;padding:8px;border-radius:8px;'
-        f'text-decoration:none;font-weight:700;'
+        f'style="flex:1;text-align:center;padding:8px 4px;border-radius:8px;'
+        f'text-decoration:none;font-weight:700;font-size:.9rem;'
         f'background:{"#D97706" if h==hours else "#263347"};'
         f'color:{"#111" if h==hours else "#9CA3AF"}">{lbl}</a>'
         for lbl, h in ranges)
@@ -1153,7 +1153,7 @@ def _make_flask_app():
             hours = int(request.args.get("h", 24))
         except (TypeError, ValueError):
             hours = 24
-        if hours not in (24, 24 * 7, 24 * 30):
+        if hours not in (1, 6, 24, 24 * 7, 24 * 30):
             hours = 24
         return _mobile_page("Incubator",
                             _incubator_detail_body(inc_id, hours),
