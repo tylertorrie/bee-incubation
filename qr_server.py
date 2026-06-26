@@ -586,18 +586,7 @@ def _inspection_record_html(r: dict, actions: bool = False) -> str:
         n_ti = idb.count_tray_inspections(rid)
         tray_link_html = (
             f'<a class="ibtn" style="margin-top:10px;background:#7C3AED" '
-            f'href="/m/inspection/{rid}">📋 Open full report · {n_ti} tray inspection(s) ›</a>'
-        )
-        actions_html = (
-            '<div style="display:flex;gap:8px;margin-top:8px">'
-            f'<a class="ibtn" style="flex:1;margin-top:0;padding:9px" '
-            f'href="/m/inspect/{iid}/edit/{rid}">✎ Edit</a>'
-            f'<form method="POST" action="/m/inspection/{rid}/delete" style="flex:1" '
-            f'onsubmit="return confirm(\'Delete this inspection and its tray inspections?\')">'
-            f'<button type="submit" style="width:100%;background:#7F1D1D;color:#fff;'
-            f'border:none;border-radius:10px;padding:9px;font-weight:700">🗑 Delete</button>'
-            '</form>'
-            '</div>'
+            f'href="/m/inspection/{rid}">📋 Open report · {n_ti} tray inspection(s) ›</a>'
         )
 
     return (
@@ -831,28 +820,54 @@ def _tray_insp_card(ti: dict, master_inc_id=None) -> str:
     )
 
 
-def _inspection_report_body(insp_id: int, saved: bool = False) -> str:
-    """Full inspection report: the incubator inspection answers + its tray
-    inspections, all in one connected view."""
+def _inspection_page_body(inc: dict, insp: dict = None, saved: bool = False) -> str:
+    """One editable inspection page: the normal questions AND, between the
+    checklist and notes, an 'Add tray inspection' button + the trays already
+    added. New inspection when insp is None; otherwise edits the existing one.
+    """
     import inspection_db as idb
     from datetime import datetime
-    insp = idb.get_inspection_by_id(insp_id)
-    if not insp:
-        return ('<div class="topbar"><h1>Inspection</h1></div><div class="wrap">'
-                '<div class="card"><div class="soon">Not found.</div></div></div>')
-    inc_id   = insp["incubator_id"]
-    inc = next((i for i in db.get_incubators(include_hidden=True)
-                if i["id"] == inc_id), None)
-    inc_name = inc["name"] if inc else "—"
-    try:
-        when = datetime.fromisoformat(insp["timestamp"]).strftime("%a %b %d  ·  %I:%M %p")
-    except Exception:
-        when = (insp.get("timestamp") or "")[:16]
-    period = _PERIOD_LABEL.get(insp.get("period"), "Manual entry")
+    inc_id   = inc["id"]
+    is_new   = insp is None
+    insp_id  = None if is_new else insp["id"]
+
+    if is_new:
+        action = f'/m/inspect/{inc_id}'
+        period = idb.get_current_period()
+        when   = datetime.now().strftime("%a %b %d  ·  %I:%M %p")
+        row    = db.get_latest_reading(inc_id)
+        govee  = row["temperature_c"] if row else None
+        thermo_val = ""
+        notes_val  = ""
+        def _checked(key, default):
+            return "checked" if default else ""
+    else:
+        action = f'/m/inspection/{insp_id}/save'
+        period = insp.get("period")
+        try:
+            when = datetime.fromisoformat(insp["timestamp"]).strftime("%a %b %d  ·  %I:%M %p")
+        except Exception:
+            when = (insp.get("timestamp") or "")[:16]
+        govee = insp.get("govee_temp_c")
+        tv = insp.get("thermometer_temp_c")
+        thermo_val = "" if tv is None else f"{tv}"
+        notes_val  = insp.get("notes") or ""
+        def _checked(key, default):
+            return "checked" if insp.get(key) else ""
+
+    per_label = _PERIOD_LABEL.get(period, "Manual entry")
+    govee_txt = (f"Govee reading: {govee:.1f} °C" if govee is not None
+                 else "Govee reading: none available")
+
+    checks = ""
+    for key, label, default in _CHECKLIST:
+        checks += (f'<label class="chk"><span>{label}</span>'
+                   f'<input type="checkbox" form="insp" name="{key}" '
+                   f'{_checked(key, default)}></label>')
 
     parts = [
         '<div class="topbar">'
-        f'<h1>🔍 {inc_name}</h1>'
+        f'<h1>🔍 {inc["name"]}</h1>'
         f'<a href="/m/inspections/{inc_id}" '
         'style="color:#9CA3AF;text-decoration:none;font-size:.9rem">‹ Back</a>'
         '</div><div class="wrap">'
@@ -860,80 +875,79 @@ def _inspection_report_body(insp_id: int, saved: bool = False) -> str:
     if saved:
         parts.append('<div class="banner">✓ Saved</div>')
 
+    # The form element itself (empty); fields below reference it via form="insp"
+    parts.append(f'<form id="insp" method="POST" action="{action}"></form>')
+
+    # Header
     parts.append(
         '<div class="card">'
-        f'<div class="cn">Inspection report</div>'
         f'<div class="meta">{when}</div>'
-        f'<div class="period">● {period}</div>'
+        f'<div class="period">● {per_label}</div>'
+        f'<div class="gv">{govee_txt}</div>'
         '</div>'
     )
-
-    # ── Normal inspection answers ──
-    thermo = insp.get("thermometer_temp_c")
-    govee  = insp.get("govee_temp_c")
-    temp_rows = ""
-    if thermo is not None:
-        col = "#EF4444" if insp.get("temp_alert") else "#F3F4F6"
-        gtxt = f"  ·  Govee {govee:.1f}°C" if govee is not None else ""
-        temp_rows = (f'<div class="meta" style="color:{col}">'
-                     f'🌡 Thermometer {thermo:.1f}°C{gtxt}'
-                     + ('  ⚠ alert' if insp.get("temp_alert") else '') + '</div>')
-    else:
-        temp_rows = '<div class="meta">🌡 No thermometer reading</div>'
-
-    def _ok_row(label, ok):
-        c = "#22C55E" if ok else "#EF4444"
-        t = "✓ working" if ok else "✗ not working"
-        return f'<div class="meta" style="color:{c}">{label}: {t}</div>'
-
-    def _obs_row(label, yes, bad):
-        if yes:
-            c = "#EF4444" if bad else "#FBBF24"
-            return f'<div class="meta" style="color:{c}">{label}: Yes</div>'
-        return f'<div class="meta" style="color:#9CA3AF">{label}: No</div>'
-
-    checklist_html = (
-        _ok_row("Heat pumps",  insp.get("heat_pumps_ok"))
-        + _ok_row("Fans",         insp.get("fans_ok"))
-        + _ok_row("Black lights", insp.get("black_lights_ok"))
-        + _obs_row("Bees emerging",      insp.get("bees_emerging"),      bad=False)
-        + _obs_row("Parasites emerging", insp.get("parasites_emerging"), bad=True)
-    )
-    notes = (insp.get("notes") or "").strip()
-    notes_html = (f'<div class="meta" style="color:#CBD5E1;margin-top:6px">“{notes}”</div>'
-                  if notes else "")
-
+    # Thermometer
     parts.append(
-        '<div class="card">'
-        f'{temp_rows}'
-        '<div style="height:6px"></div>'
-        f'{checklist_html}{notes_html}'
-        f'<a class="ibtn" style="margin-top:12px;background:#263347" '
-        f'href="/m/inspect/{inc_id}/edit/{insp_id}">✎ Edit inspection answers</a>'
-        '</div>'
+        '<div class="card"><div class="fld">'
+        '<label>Thermometer reading (°C)</label>'
+        f'<input type="number" step="0.1" form="insp" name="thermometer_temp_c" '
+        f'inputmode="decimal" placeholder="e.g. 27.5" value="{thermo_val}"></div></div>'
+    )
+    # Checklist
+    parts.append(
+        '<div class="card"><div class="ml" style="margin-bottom:8px">Checklist</div>'
+        f'{checks}</div>'
     )
 
-    # ── Tray inspections (nested under this report) ──
-    tis = idb.get_tray_inspections(insp_id)
+    # ── Tray inspections (the spot you circled: between checklist and notes) ──
+    parts.append('<div class="ml" style="margin:16px 4px 8px">Tray inspections</div>')
     parts.append(
-        f'<div class="ml" style="margin:18px 4px 8px">Tray inspections ({len(tis)})</div>'
-        '<a class="ibtn" style="background:#7C3AED" '
-        f'href="/m/scan?next=/m/inspection/{insp_id}/tray-form">📷 Scan a tray to inspect</a>'
-        f'<form method="GET" action="/m/inspection/{insp_id}/tray-form" class="fld" '
-        'style="margin-top:10px;margin-bottom:14px">'
-        '<div style="display:flex;gap:8px">'
-        '<input type="text" name="q" placeholder="or enter tray # (e.g. 123)" '
-        'autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" '
-        'style="flex:1">'
-        '<button class="savebtn" style="width:auto;margin-top:0;padding:12px 18px" '
-        'type="submit">Go</button></div></form>'
+        '<button form="insp" type="submit" name="action" value="add_tray" '
+        'class="ibtn" style="width:100%;border:none;cursor:pointer;background:#7C3AED">'
+        '➕ Add tray inspection (scan)</button>'
     )
-    if tis:
-        for ti in tis:
-            parts.append(_tray_insp_card(ti))
+    if not is_new:
+        tis = idb.get_tray_inspections(insp_id)
+        parts.append(
+            f'<form method="GET" action="/m/inspection/{insp_id}/tray-form" class="fld" '
+            'style="margin-top:10px;margin-bottom:6px"><div style="display:flex;gap:8px">'
+            '<input type="text" name="q" placeholder="or add by tray # (e.g. 123)" '
+            'autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off" '
+            'style="flex:1">'
+            '<button class="savebtn" style="width:auto;margin-top:0;padding:12px 18px" '
+            'type="submit">Go</button></div></form>'
+        )
+        if tis:
+            for ti in tis:
+                parts.append(_tray_insp_card(ti))
+        else:
+            parts.append('<div class="meta" style="margin:4px;color:#6B7280">'
+                         'None added yet.</div>')
     else:
-        parts.append('<div class="card"><div class="soon">'
-                     'No tray inspections yet. Scan or enter a tray above.</div></div>')
+        parts.append('<div class="meta" style="margin:6px 4px;color:#6B7280">'
+                     'Save the inspection (or tap Add) to attach tray inspections.</div>')
+
+    # Notes
+    parts.append(
+        '<div class="card" style="margin-top:14px"><div class="fld"><label>Notes</label>'
+        f'<textarea form="insp" name="notes" placeholder="Optional notes…">{notes_val}'
+        '</textarea></div></div>'
+    )
+    # Save
+    parts.append(
+        '<button form="insp" type="submit" name="action" value="save" '
+        'class="savebtn">💾  Save Inspection</button>'
+    )
+    # Delete (existing only)
+    if not is_new:
+        parts.append(
+            f'<form method="POST" action="/m/inspection/{insp_id}/delete" '
+            'onsubmit="return confirm(\'Delete this whole inspection and its tray inspections?\')" '
+            'style="margin-top:10px">'
+            '<button type="submit" style="width:100%;background:#7F1D1D;color:#fff;'
+            'border:none;border-radius:10px;padding:12px;font-weight:700">'
+            '🗑 Delete inspection</button></form>'
+        )
     parts.append('</div>')
     return "".join(parts)
 
@@ -1024,6 +1038,21 @@ def _update_mobile_inspection(insp_id: int, form) -> Optional[int]:
         data[key] = key in form
 
     idb.update_inspection(insp_id, data)
+
+    if temp_alert:
+        inc_id = existing.get("incubator_id")
+        inc = next((i for i in db.get_incubators(include_hidden=True)
+                    if i["id"] == inc_id), None)
+        try:
+            db.add_alert(
+                "inspection_temp",
+                (f"Inspection temp alert — {inc['name'] if inc else inc_id}: "
+                 f"Thermometer {thermo_c:.1f}°C vs Govee {govee_temp:.1f}°C "
+                 f"(Δ {temp_diff:.1f}°C)"),
+                severity="warning", incubator_id=inc_id,
+            )
+        except Exception:
+            pass
     return existing.get("incubator_id")
 
 
@@ -1411,17 +1440,12 @@ def _make_flask_app():
 
     @app.route("/m/inspect/<int:inc_id>", methods=["GET"])
     def mobile_inspect_form(inc_id):
-        import inspection_db as idb
         inc = next((i for i in db.get_incubators(include_hidden=True)
                     if i["id"] == inc_id), None)
         if not inc:
             return "<h2 style='color:red;padding:20px;font-family:sans-serif'>Incubator not found</h2>", 404
-        row    = db.get_latest_reading(inc_id)
-        govee  = row["temperature_c"] if row else None
-        period = idb.get_current_period()
         return _mobile_page(f"Inspect {inc['name']}",
-                            _inspection_form_body(inc, govee, period),
-                            active="inspect")
+                            _inspection_page_body(inc, None), active="inspect")
 
     @app.route("/m/inspect/<int:inc_id>", methods=["POST"])
     def mobile_inspect_save(inc_id):
@@ -1429,17 +1453,37 @@ def _make_flask_app():
         new_id = _save_mobile_inspection(inc_id, request.form)
         if _on_update:
             _on_update(None)
-        if new_id:
-            # Land on the report page so trays can be inspected under it
-            return redirect(f"/m/inspection/{new_id}?saved=1")
-        return redirect(f"/m/inspections/{inc_id}?saved=1")
+        if not new_id:
+            return redirect(f"/m/inspections/{inc_id}?saved=1")
+        if request.form.get("action") == "add_tray":
+            return redirect(f"/m/scan?next=/m/inspection/{new_id}/tray-form")
+        return redirect(f"/m/inspection/{new_id}?saved=1")
 
     @app.route("/m/inspection/<int:insp_id>")
     def mobile_inspection_report(insp_id):
+        import inspection_db as idb
         saved = request.args.get("saved")
+        insp = idb.get_inspection_by_id(insp_id)
+        if not insp:
+            return _mobile_page("Inspection",
+                '<div class="topbar"><h1>Inspection</h1></div><div class="wrap">'
+                '<div class="card"><div class="soon">Not found.</div></div></div>',
+                active="inspect")
+        inc = next((i for i in db.get_incubators(include_hidden=True)
+                    if i["id"] == insp["incubator_id"]), {"id": insp["incubator_id"], "name": "—"})
         return _mobile_page("Inspection",
-                            _inspection_report_body(insp_id, saved=bool(saved)),
+                            _inspection_page_body(inc, insp, saved=bool(saved)),
                             active="inspect")
+
+    @app.route("/m/inspection/<int:insp_id>/save", methods=["POST"])
+    def mobile_inspection_update(insp_id):
+        from flask import redirect
+        _update_mobile_inspection(insp_id, request.form)
+        if _on_update:
+            _on_update(None)
+        if request.form.get("action") == "add_tray":
+            return redirect(f"/m/scan?next=/m/inspection/{insp_id}/tray-form")
+        return redirect(f"/m/inspection/{insp_id}?saved=1")
 
     @app.route("/m/inspection/<int:insp_id>/tray-form", methods=["GET"])
     def mobile_tray_insp_form(insp_id):
@@ -1549,26 +1593,9 @@ def _make_flask_app():
 
     @app.route("/m/inspect/<int:inc_id>/edit/<int:insp_id>", methods=["GET"])
     def mobile_inspect_edit_form(inc_id, insp_id):
-        import inspection_db as idb
-        inc = next((i for i in db.get_incubators(include_hidden=True)
-                    if i["id"] == inc_id), None)
-        existing = idb.get_inspection_by_id(insp_id)
-        if not inc or not existing:
-            return "<h2 style='color:red;padding:20px;font-family:sans-serif'>Not found</h2>", 404
-        return _mobile_page(f"Edit — {inc['name']}",
-                            _inspection_form_body(
-                                inc, existing.get("govee_temp_c"),
-                                existing.get("period", "manual"),
-                                existing=existing),
-                            active="inspect")
-
-    @app.route("/m/inspect/<int:inc_id>/edit/<int:insp_id>", methods=["POST"])
-    def mobile_inspect_edit_save(inc_id, insp_id):
+        # Editing is now inline on the unified inspection page
         from flask import redirect
-        _update_mobile_inspection(insp_id, request.form)
-        if _on_update:
-            _on_update(None)
-        return redirect(f"/m/inspections/{inc_id}?saved=1")
+        return redirect(f"/m/inspection/{insp_id}")
 
     @app.route("/m/inspection/<int:insp_id>/delete", methods=["POST"])
     def mobile_inspection_delete(insp_id):
