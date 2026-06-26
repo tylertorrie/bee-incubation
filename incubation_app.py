@@ -10,9 +10,14 @@ Dependencies:
 """
 import sys
 import os
+import subprocess
 import threading
 import time
 from datetime import datetime
+
+# Windows: run helper subprocesses (git, py_compile, poller) hidden so no
+# console window flashes up and steals focus while you're working.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 from tkinter import ttk, filedialog, messagebox
 import tkinter as tk
 
@@ -58,17 +63,16 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.6.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.6.2"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
     """Short git commit hash + date for the running code, or '' if unavailable."""
     try:
-        import subprocess
         app_dir = os.path.dirname(os.path.abspath(__file__))
         out = subprocess.run(
             ["git", "-C", app_dir, "log", "-1", "--format=%h · %cd", "--date=short"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW,
         )
         return out.stdout.strip() if out.returncode == 0 else ""
     except Exception:
@@ -1972,14 +1976,13 @@ class IncubationApp(ctk.CTk):
                 text_color=SUBTEXT)
 
     def _kill_poller_processes(self):
-        import subprocess
         subprocess.run(
             ["wmic", "process", "where", "commandline like '%govee_poller%'", "delete"],
-            capture_output=True
+            capture_output=True, creationflags=_NO_WINDOW
         )
 
     def _enable_poller(self):
-        import subprocess, sys, winreg
+        import winreg
         self._kill_poller_processes()  # stop any existing instances first
         pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
         if not os.path.exists(pythonw):
@@ -1996,7 +1999,7 @@ class IncubationApp(ctk.CTk):
                 f"Could not register startup entry:\n{exc}", parent=self)
             return
         # Start it immediately too
-        subprocess.Popen([pythonw, self._POLLER_SCRIPT])
+        subprocess.Popen([pythonw, self._POLLER_SCRIPT], creationflags=_NO_WINDOW)
         self._refresh_poller_status()
         messagebox.showinfo("Background Poller",
             "Poller enabled and started.\n\n"
@@ -3480,11 +3483,10 @@ class IncubationApp(ctk.CTk):
         """Pull latest code from GitHub in a background thread."""
         def _pull():
             try:
-                import subprocess
                 app_dir = os.path.dirname(os.path.abspath(__file__))
                 result  = subprocess.run(
                     ["git", "-C", app_dir, "pull", "--ff-only"],
-                    capture_output=True, text=True, timeout=20,
+                    capture_output=True, text=True, timeout=20, creationflags=_NO_WINDOW,
                 )
                 if result.returncode == 0:
                     msg = result.stdout.strip() or "Already up to date."
@@ -3541,12 +3543,13 @@ class IncubationApp(ctk.CTk):
 
     def _auto_sync_once(self):
         """One full sync pass: pull → (commit local edits) → push. Thread-safe."""
-        import subprocess, socket
+        import socket
         app_dir = os.path.dirname(os.path.abspath(__file__))
 
         def _git(*args, timeout=40):
             return subprocess.run(["git", "-C", app_dir, *args],
-                                  capture_output=True, text=True, timeout=timeout)
+                                  capture_output=True, text=True, timeout=timeout,
+                                  creationflags=_NO_WINDOW)
 
         self._sync_log("[AutoSync] checking for updates…")
         _did_something = False
@@ -3579,7 +3582,7 @@ class IncubationApp(ctk.CTk):
             for rel in changed_py:
                 chk = subprocess.run(
                     [sys.executable, "-m", "py_compile", os.path.join(app_dir, rel)],
-                    capture_output=True, text=True)
+                    capture_output=True, text=True, creationflags=_NO_WINDOW)
                 if chk.returncode != 0:
                     self.after(0, lambda f=rel: self._set_git_status(
                         f"sync paused: {os.path.basename(f)} has errors", ok=False))
