@@ -844,8 +844,9 @@ def _trays_home_body(notfound: str = None) -> str:
         '<form method="GET" action="/m/tray-lookup" class="fld" style="margin-bottom:16px">'
         '<label>Or find a tray by number</label>'
         '<div style="display:flex;gap:8px">'
-        '<input type="text" name="q" placeholder="e.g. Tray0123" '
-        'autocapitalize="characters" autocomplete="off" style="flex:1">'
+        '<input type="text" name="q" placeholder="e.g. 123 or Tray0123" '
+        'autocapitalize="off" autocorrect="off" spellcheck="false" '
+        'autocomplete="off" style="flex:1">'
         '<button class="savebtn" style="width:auto;margin-top:0;padding:12px 18px" '
         'type="submit">Go</button>'
         '</div></form>'
@@ -899,15 +900,17 @@ _SCAN_BODY = """
     var done = false;
     function onScan(text){
       if (done) return;
+      done = true;
+      document.getElementById('scanmsg').textContent = 'Found code — opening…';
+      var dest;
       var m = text.match(/\\/tray\\/(\\d+)/);
       if (m){
-        done = true;
-        document.getElementById('scanmsg').textContent = 'Found tray — opening…';
-        qr.stop().then(function(){ window.location = '/tray/' + m[1]; })
-                  .catch(function(){ window.location = '/tray/' + m[1]; });
+        dest = '/tray/' + m[1];                       // QR holds a tray URL
       } else {
-        document.getElementById('scanmsg').textContent = 'That QR is not a tray code.';
+        dest = '/m/tray-lookup?q=' + encodeURIComponent(text.trim());  // bare number/text
       }
+      qr.stop().then(function(){ window.location = dest; })
+                .catch(function(){ window.location = dest; });
     }
     qr.start({facingMode:"environment"}, {fps:10, qrbox:240}, onScan, function(){})
       .catch(function(e){
@@ -922,6 +925,26 @@ _SCAN_BODY = """
 })();
 </script>
 """
+
+
+def _tray_results_body(query: str, matches: list) -> str:
+    """List of trays matching a search (when more than one matches)."""
+    parts = ['<div class="topbar"><h1>📦 Search</h1>'
+             '<a href="/m/trays" style="color:#9CA3AF;text-decoration:none;font-size:.9rem">‹ Back</a>'
+             '</div><div class="wrap">'
+             f'<div class="meta" style="margin:0 4px 10px">{len(matches)} matches for “{query}”</div>']
+    for t in matches:
+        tn  = t.get("tray_number") or "—"
+        sm  = t.get("sample_name") or "—"
+        inc = t.get("incubator_name") or "—"
+        stt = t.get("status") or "active"
+        parts.append(
+            f'<a class="trow" href="/tray/{t["id"]}">'
+            f'<div><div class="tn">{tn}</div><div class="ts">{sm} · {inc}</div></div>'
+            f'<div class="tg" style="color:#9CA3AF">{stt}</div></a>'
+        )
+    parts.append('</div>')
+    return "".join(parts)
 
 
 def _incubator_trays_body(inc_id: int) -> str:
@@ -941,6 +964,7 @@ def _incubator_trays_body(inc_id: int) -> str:
         '</div><div class="wrap">'
         '<div class="fld" style="margin-bottom:12px">'
         '<input type="search" id="q" placeholder="Filter by tray # or sample…" '
+        'autocapitalize="off" autocorrect="off" spellcheck="false" '
         'autocomplete="off" oninput="filt()"></div>'
         f'<div class="meta" id="cnt" style="margin:0 4px 10px">{len(trays)} active trays</div>'
         '<div id="list">'
@@ -1256,9 +1280,11 @@ def _make_flask_app():
         q = (request.args.get("q") or "").strip()
         if not q:
             return redirect("/m/trays")
-        tray = db.get_tray_by_number(q)
-        if tray:
-            return redirect(f"/tray/{tray['id']}")
+        matches = db.find_trays(q)
+        if len(matches) == 1:
+            return redirect(f"/tray/{matches[0]['id']}")
+        if len(matches) > 1:
+            return _mobile_page("Search", _tray_results_body(q, matches), active="trays")
         return redirect(f"/m/trays?notfound={quote(q)}")
 
     # ── VOC / ESP32 endpoints ─────────────────────────────────────────────────

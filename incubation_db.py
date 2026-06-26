@@ -5,6 +5,7 @@ Tables: incubators, samples, incubation_batches, trays,
 """
 import sqlite3
 import os
+import re
 from datetime import datetime, timedelta
 
 _SRC_DIR    = os.path.dirname(os.path.abspath(__file__))
@@ -445,7 +446,7 @@ def get_tray_by_id(tray_id: int) -> dict | None:
 
 
 def get_tray_by_number(tray_number: str, active_only: bool = False) -> dict | None:
-    """Return the tray row for tray_number.
+    """Return the tray row for tray_number (case-insensitive exact match).
     Prefers the active row; falls back to the most recently inserted historical row.
     Pass active_only=True to return None when the tray has no active record."""
     with get_conn() as conn:
@@ -454,7 +455,7 @@ def get_tray_by_number(tray_number: str, active_only: bool = False) -> dict | No
             FROM trays t
             LEFT JOIN samples    s ON t.sample_id    = s.id
             LEFT JOIN incubators i ON t.incubator_id = i.id
-            WHERE t.tray_number=?
+            WHERE t.tray_number = ? COLLATE NOCASE
             ORDER BY CASE WHEN t.status='active' THEN 0 ELSE 1 END, t.id DESC
         """, (tray_number,)).fetchall()
         if not rows:
@@ -475,6 +476,52 @@ def get_tray_history(tray_number: str) -> list:
             WHERE t.tray_number=?
             ORDER BY t.id DESC
         """, (tray_number,)).fetchall()]
+
+
+def find_trays(query: str, limit: int = 25) -> list:
+    """Flexible, case-insensitive tray search for the UI.
+
+    Matches in order of preference:
+      - exact tray number (any case): "tray0123" == "Tray0123"
+      - contains the typed text:       "0123" -> "Tray0123"
+      - contains just the digits:      "123"  -> "Tray0123"
+    Returns one row per tray number (active record preferred), best matches first.
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    digits = re.sub(r"\D", "", q)
+
+    conds  = ["t.tray_number = ? COLLATE NOCASE",
+              "t.tray_number LIKE ? COLLATE NOCASE"]
+    params = [q, f"%{q}%"]
+    if digits and digits != q:
+        conds.append("t.tray_number LIKE ? COLLATE NOCASE")
+        params.append(f"%{digits}%")
+
+    sql = f"""
+        SELECT t.*, s.name AS sample_name, i.name AS incubator_name
+        FROM trays t
+        LEFT JOIN samples    s ON t.sample_id    = s.id
+        LEFT JOIN incubators i ON t.incubator_id = i.id
+        WHERE {" OR ".join(conds)}
+        ORDER BY (t.tray_number = ? COLLATE NOCASE) DESC,
+                 CASE WHEN t.status='active' THEN 0 ELSE 1 END,
+                 t.tray_number, t.id DESC
+    """
+    params.append(q)  # for the ORDER BY exact-match-first
+
+    seen, out = set(), []
+    with get_conn() as conn:
+        for r in conn.execute(sql, params).fetchall():
+            d = dict(r)
+            if d["tray_number"] in seen:
+                continue            # keep one row per tray number (best first)
+            seen.add(d["tray_number"])
+            out.append(d)
+            if len(out) >= limit:
+                break
+    return out
 
 
 def release_tray(tray_number: str, out_date: str = None, notes_append: str = "") -> bool:
