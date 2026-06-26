@@ -447,7 +447,11 @@ def get_trays(incubator_id: int = None, sample_id: int = None,
         if batch_id is not None:
             q += " AND t.incubation_batch_id=?"; params.append(batch_id)
         if status:
-            q += " AND t.status=?";              params.append(status)
+            if isinstance(status, (list, tuple, set)):
+                q += " AND t.status IN (%s)" % ",".join("?" * len(status))
+                params.extend(status)
+            else:
+                q += " AND t.status=?";          params.append(status)
         q += " ORDER BY t.tray_number"
         return [dict(r) for r in conn.execute(q, params).fetchall()]
 
@@ -693,14 +697,24 @@ def delete_all_trays() -> int:
         return n
 
 
-def get_tray_stats(incubator_id: int = None, status: str = None) -> dict:
-    """Return {count, total_gals} using SQL aggregates — much faster than fetching all rows."""
+# Tray statuses that mean the tray is physically still in the incubator
+# (count drops only when a tray is released/removed).
+IN_INCUBATOR_STATUSES = ("active", "cooled")
+
+
+def get_tray_stats(incubator_id: int = None, status=None) -> dict:
+    """Return {count, total_gals} using SQL aggregates — much faster than fetching all rows.
+    `status` may be a single value or a list/tuple of values."""
     q      = "SELECT COUNT(*) AS cnt, COALESCE(SUM(volume_gal), 0) AS gals FROM trays WHERE 1=1"
     params = []
     if incubator_id is not None:
         q += " AND incubator_id=?"; params.append(incubator_id)
     if status:
-        q += " AND status=?";       params.append(status)
+        if isinstance(status, (list, tuple, set)):
+            q += " AND status IN (%s)" % ",".join("?" * len(status))
+            params.extend(status)
+        else:
+            q += " AND status=?";   params.append(status)
     with get_conn() as conn:
         row = conn.execute(q, params).fetchone()
         return {"count": row[0], "total_gals": row[1]}

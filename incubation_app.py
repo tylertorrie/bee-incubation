@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.8.2"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.8.3"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -1066,7 +1066,8 @@ class IncubationApp(ctk.CTk):
             return
 
         # Summary row — use aggregate query, not full row fetch
-        _stats         = db.get_tray_stats(status="active")
+        # "In incubator" = active + cooled (count only drops on release)
+        _stats         = db.get_tray_stats(status=db.IN_INCUBATOR_STATUSES)
         tray_count     = _stats["count"]
         total_gals     = _stats["total_gals"]
         total_capacity = sum((i.get("capacity") or 0) for i in incubators)
@@ -1216,7 +1217,7 @@ class IncubationApp(ctk.CTk):
         # Right: tray count + fill % — aggregate query, no full row fetch
         right = ctk.CTkFrame(bottom, fg_color="transparent")
         right.grid(row=0, column=1, sticky="e")
-        _ts    = db.get_tray_stats(incubator_id=inc["id"], status="active")
+        _ts    = db.get_tray_stats(incubator_id=inc["id"], status=db.IN_INCUBATOR_STATUSES)
         capacity   = inc.get("capacity") or 50
         fill_pct   = round(_ts["count"] / capacity * 100) if capacity else 0
         _label(right, f"{_ts['count']} / {capacity} trays", FONT_S, TEXT).pack(anchor="e")
@@ -2572,7 +2573,7 @@ class IncubationApp(ctk.CTk):
                     w.destroy()
                 # Only show trays currently in this incubator (active);
                 # released/removed trays drop off the list.
-                trays = db.get_trays(incubator_id=fresh["id"], status="active")
+                trays = db.get_trays(incubator_id=fresh["id"], status=db.IN_INCUBATOR_STATUSES)
                 tray_count_lbl.configure(text=f"{len(trays)} tray(s)")
                 _update_delete_btn()
                 if trays:
@@ -2762,7 +2763,7 @@ class IncubationApp(ctk.CTk):
         tt = tabs.add("Trays")
         tr_scroll = ctk.CTkScrollableFrame(tt, fg_color="transparent")
         tr_scroll.pack(fill="both", expand=True)
-        for tray in db.get_trays(incubator_id=inc["id"], status="active"):
+        for tray in db.get_trays(incubator_id=inc["id"], status=db.IN_INCUBATOR_STATUSES):
             tr = ctk.CTkFrame(tr_scroll, fg_color=CARD2, corner_radius=6)
             tr.pack(fill="x", pady=2, padx=4)
             _label(tr, f"Tray {tray['tray_number']}", FONT_B, TEXT).pack(

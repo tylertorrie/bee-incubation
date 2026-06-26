@@ -268,7 +268,7 @@ def _dashboard_data() -> dict:
                 temp_col = "#22C55E" if (t_min <= temp_c <= t_max) else "#EF4444"
 
         poll_txt, poll_col = _mobile_poll_age(ts)
-        stats = db.get_tray_stats(incubator_id=inc["id"], status="active")
+        stats = db.get_tray_stats(incubator_id=inc["id"], status=db.IN_INCUBATOR_STATUSES)
         insp  = (idb.get_inspection_status(inc["id"]) if idb
                  else {"morning": "pending", "evening": "pending"})
 
@@ -470,7 +470,7 @@ def _incubator_detail_body(inc_id: int, hours: int) -> str:
         f'color:{"#111" if h==hours else "#9CA3AF"}">{lbl}</a>'
         for lbl, h in ranges)
 
-    stats = db.get_tray_stats(incubator_id=inc_id, status="active")
+    stats = db.get_tray_stats(incubator_id=inc_id, status=db.IN_INCUBATOR_STATUSES)
     am = pm = False
     if idb:
         st = idb.get_inspection_status(inc_id)
@@ -503,7 +503,7 @@ def _incubator_detail_body(inc_id: int, hours: int) -> str:
         '<span class="meta" style="color:#60A5FA">- - Humidity</span>'
         '</div>'
         '</div>'
-        f'<a class="ibtn" href="/m/trays/{inc_id}">📦 {stats["count"]} active trays ·'
+        f'<a class="ibtn" href="/m/trays/{inc_id}">📦 {stats["count"]} trays ·'
         f' {stats["total_gals"]:.1f} gal ›</a>'
         f'<a class="ibtn" style="background:#15803D" href="/m/inspections/{inc_id}">'
         '🔍 Inspections & reports ›</a>'
@@ -1236,12 +1236,12 @@ def _trays_home_body(notfound: str = None) -> str:
         '</div></form>'
     )
     for inc in db.get_incubators():
-        st = db.get_tray_stats(incubator_id=inc["id"], status="active")
+        st = db.get_tray_stats(incubator_id=inc["id"], status=db.IN_INCUBATOR_STATUSES)
         parts.append(
             f'<a href="/m/trays/{inc["id"]}" style="text-decoration:none;color:inherit">'
             '<div class="card">'
             f'<div class="cn">{inc["name"]}</div>'
-            f'<div class="meta" style="margin-top:6px">📦 {st["count"]} active trays '
+            f'<div class="meta" style="margin-top:6px">📦 {st["count"]} trays '
             f'· {st["total_gals"]:.1f} gal — tap to view ›</div>'
             '</div></a>'
         )
@@ -1360,7 +1360,7 @@ def _incubator_trays_body(inc_id: int) -> str:
                 '<div class="card"><div class="soon">Incubator not found.</div>'
                 '</div></div>')
 
-    trays = db.get_trays(incubator_id=inc_id, status="active")
+    trays = db.get_trays(incubator_id=inc_id, status=db.IN_INCUBATOR_STATUSES)
     parts = [
         '<div class="topbar">'
         f'<h1>📦 {inc["name"]}</h1>'
@@ -1370,7 +1370,7 @@ def _incubator_trays_body(inc_id: int) -> str:
         '<input type="search" id="q" placeholder="Filter by tray # or sample…" '
         'autocapitalize="off" autocorrect="off" spellcheck="false" '
         'autocomplete="off" oninput="filt()"></div>'
-        f'<div class="meta" id="cnt" style="margin:0 4px 10px">{len(trays)} active trays</div>'
+        f'<div class="meta" id="cnt" style="margin:0 4px 10px">{len(trays)} trays</div>'
         '<div id="list">'
     ]
     if trays:
@@ -1386,7 +1386,7 @@ def _incubator_trays_body(inc_id: int) -> str:
                 f'<div class="tg">{vtxt}</div></a>'
             )
     else:
-        parts.append('<div class="card"><div class="soon">No active trays.</div></div>')
+        parts.append('<div class="card"><div class="soon">No trays in this incubator.</div></div>')
     parts.append('</div></div>')
     parts.append(
         '<script>'
@@ -1395,7 +1395,7 @@ def _incubator_trays_body(inc_id: int) -> str:
         'var n=0;'
         'document.querySelectorAll(".trow").forEach(function(e){'
         'var m=e.dataset.s.indexOf(q)>=0;e.style.display=m?"":"none";if(m)n++;});'
-        'document.getElementById("cnt").textContent=n+" active trays";'
+        'document.getElementById("cnt").textContent=n+" trays";'
         '}'
         '</script>'
     )
