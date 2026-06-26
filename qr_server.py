@@ -62,6 +62,7 @@ _TRAY_HTML = """<!DOCTYPE html>
     <div class="card-title">Current Info</div>
     <div class="info-row"><span>Status</span><span class="info-val">{{ status_label }}</span></div>
     <div class="info-row"><span>In Date</span><span class="info-val">{{ tray.in_date or "—" }}</span></div>
+    {% if tray.cool_date %}<div class="info-row"><span>Cool Date</span><span class="info-val">{{ tray.cool_date }}</span></div>{% endif %}
     <div class="info-row"><span>Out Date</span><span class="info-val">{{ tray.out_date or "—" }}</span></div>
   </div>
 

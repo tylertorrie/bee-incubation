@@ -612,6 +612,13 @@ def count_active_trays(incubator_id: int) -> int:
             (incubator_id,)).fetchone()[0]
 
 
+def count_cooled_trays(incubator_id: int) -> int:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM trays WHERE incubator_id=? AND status='cooled'",
+            (incubator_id,)).fetchone()[0]
+
+
 def cool_trays(incubator_id: int, cool_date: str = None) -> int:
     """Move an incubator's active (in-incubation) trays to 'cooled' and stamp
     cool_date. Returns the number moved."""
@@ -625,6 +632,20 @@ def cool_trays(incubator_id: int, cool_date: str = None) -> int:
             "UPDATE trays SET status='cooled', cool_date=COALESCE(cool_date, ?) "
             "WHERE incubator_id=? AND status='active'",
             (cd, incubator_id))
+        return n
+
+
+def uncool_trays(incubator_id: int) -> int:
+    """Move an incubator's 'cooled' trays back to 'active' (Incubation) and
+    clear cool_date so a later cool-down starts fresh. Returns the number moved."""
+    with get_conn() as conn:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM trays WHERE incubator_id=? AND status='cooled'",
+            (incubator_id,)).fetchone()[0]
+        conn.execute(
+            "UPDATE trays SET status='active', cool_date=NULL "
+            "WHERE incubator_id=? AND status='cooled'",
+            (incubator_id,))
         return n
 
 

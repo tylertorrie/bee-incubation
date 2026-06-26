@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.8.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.8.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -134,6 +134,39 @@ def _btn(parent, text, cmd, width=110, height=32, fg=CARD2, hover=BORDER,
     return ctk.CTkButton(parent, text=text, command=cmd, width=width,
                          height=height, fg_color=fg, hover_color=hover,
                          text_color=text_color, corner_radius=6, **kw)
+
+
+def _parse_date_loose(s):
+    """Parse a date string in common formats (ISO or M/D/Y). Returns date or None."""
+    if not s:
+        return None
+    s = str(s).strip()
+    token = s.replace("T", " ").split()[0] if s else s   # the date portion
+    for cand in (token, s):
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+            try:
+                return datetime.strptime(cand, fmt).date()
+            except ValueError:
+                continue
+    try:
+        return datetime.fromisoformat(s).date()
+    except Exception:
+        return None
+
+
+def cool_down_days(tray: dict):
+    """Days a tray has been / was cooled. None if not applicable."""
+    cd = _parse_date_loose(tray.get("cool_date"))
+    if not cd:
+        return None
+    status = tray.get("status")
+    if status == "cooled":
+        end = datetime.now().date()
+    elif status == "released":
+        end = _parse_date_loose(tray.get("out_date")) or datetime.now().date()
+    else:
+        return None
+    return max((end - cd).days, 0)
 
 
 def _poll_age(timestamp_iso: str | None, interval_sec: int = 300) -> tuple[str, str]:
@@ -1452,9 +1485,13 @@ class IncubationApp(ctk.CTk):
         self._flt_status.pack(side="left", padx=6, pady=6)
         self._flt_status.configure(command=lambda _: self._refresh_trays())
 
+        # Cool-down summary for the currently-shown trays
+        self._cooldown_lbl = _label(fbar, "", FONT_S, TEAL)
+        self._cooldown_lbl.pack(side="right", padx=12, pady=6)
+
         cols = ("Tray #", "Sample", "Incubator", "Batch",
                 "Weight (lbs)", "Volume (gal)", "Live Count",
-                "Parasite %", "In Date", "Out Date", "Status")
+                "Parasite %", "In Date", "Out Date", "Cool Days", "Status")
         self._tray_tree = self._make_tree(frame, cols)
         self._tray_tree.pack(fill="both", expand=True, padx=12, pady=4)
         self._tray_tree.bind("<Double-1>", self._on_tray_double_click)
@@ -1478,7 +1515,7 @@ class IncubationApp(ctk.CTk):
         # Update heading arrows
         cols = ("Tray #", "Sample", "Incubator", "Batch",
                 "Weight (lbs)", "Volume (gal)", "Live Count",
-                "Parasite %", "In Date", "Out Date", "Status")
+                "Parasite %", "In Date", "Out Date", "Cool Days", "Status")
         for ci, col in enumerate(cols):
             arrow = (" ↑" if self._tray_sort_asc else " ↓") if ci == col_idx else ""
             tree.heading(col, text=col + arrow,
@@ -1505,7 +1542,7 @@ class IncubationApp(ctk.CTk):
         self._tray_sort_asc = True
         cols = ("Tray #", "Sample", "Incubator", "Batch",
                 "Weight (lbs)", "Volume (gal)", "Live Count",
-                "Parasite %", "In Date", "Out Date", "Status")
+                "Parasite %", "In Date", "Out Date", "Cool Days", "Status")
         for col in cols:
             tree.heading(col, text=col,
                 command=lambda c=cols.index(col): self._sort_tray_tree(c))
@@ -1528,12 +1565,22 @@ class IncubationApp(ctk.CTk):
                 f"{t['parasite_level_pct']:.1f}%" if t.get("parasite_level_pct") else "—",
                 t.get("in_date") or "—",
                 t.get("out_date") or "—",
+                (lambda d: f"{d}d" if d is not None else "—")(cool_down_days(t)),
                 db.tray_status_label(t.get("status") or "active"),
             ))
             for t in trays
         ]
         for iid, values in rows:
             tree.insert("", "end", iid=iid, values=values)
+
+        # Cool-down report: average over shown trays that have a cool-down value
+        _durs = [d for d in (cool_down_days(t) for t in trays) if d is not None]
+        if _durs:
+            self._cooldown_lbl.configure(
+                text=f"Cool-down: avg {sum(_durs)/len(_durs):.1f}d  "
+                     f"(min {min(_durs)} · max {max(_durs)}, n={len(_durs)})")
+        else:
+            self._cooldown_lbl.configure(text="")
 
     def _on_tray_double_click(self, event):
         sel = self._tray_tree.selection()
@@ -2294,7 +2341,7 @@ class IncubationApp(ctk.CTk):
             prev = next((x for x in db.get_incubators(include_hidden=True)
                          if x["id"] == iid), {}).get("temp_mode", "incubation")
             db.set_incubator_temp_mode(iid, key)
-            self._maybe_cool_trays(iid, key, prev)
+            self._sync_trays_to_mode(iid, key, prev)
             _update_range_lbl(calc.TEMP_MODES[key])
             self._refresh_current()
 
@@ -3020,23 +3067,36 @@ class IncubationApp(ctk.CTk):
         TrayDialog(self, tray, incubator_id,
                    on_save=lambda: self._refresh_current())
 
-    def _maybe_cool_trays(self, inc_id: int, new_key: str, prev_key: str):
-        """When an incubator is switched to Cool Storage, offer to move its
-        in-incubation trays to 'Cooled' and start their cool-down timer."""
-        if new_key != "cool_storage" or prev_key == "cool_storage":
-            return
-        n = db.count_active_trays(inc_id)
-        if not n:
-            return
-        if messagebox.askyesno(
-            "Move trays to Cooled?",
-            f"This incubator was switched to Cool Storage.\n\n"
-            f"Move its {n} tray(s) currently in incubation to 'Cooled' and "
-            f"start their cool-down timer (today's date)?",
-            parent=self):
-            moved = db.cool_trays(inc_id)
-            messagebox.showinfo("Trays Cooled",
-                f"Moved {moved} tray(s) to Cooled.", parent=self)
+    def _sync_trays_to_mode(self, inc_id: int, new_key: str, prev_key: str):
+        """Offer to move trays when an incubator enters or leaves Cool Storage:
+        - entering Cool Storage: Incubation -> Cooled (start cool-down timer)
+        - leaving Cool Storage:  Cooled -> Incubation (resume incubation)
+        """
+        entering = new_key == "cool_storage" and prev_key != "cool_storage"
+        leaving  = prev_key == "cool_storage" and new_key != "cool_storage"
+
+        if entering:
+            n = db.count_active_trays(inc_id)
+            if n and messagebox.askyesno(
+                "Move trays to Cooled?",
+                f"This incubator was switched to Cool Storage.\n\n"
+                f"Move its {n} tray(s) currently in incubation to 'Cooled' and "
+                f"start their cool-down timer (today's date)?",
+                parent=self):
+                moved = db.cool_trays(inc_id)
+                messagebox.showinfo("Trays Cooled",
+                    f"Moved {moved} tray(s) to Cooled.", parent=self)
+        elif leaving:
+            n = db.count_cooled_trays(inc_id)
+            if n and messagebox.askyesno(
+                "Move trays back to Incubation?",
+                f"This incubator was switched out of Cool Storage.\n\n"
+                f"Move its {n} cooled tray(s) back to 'Incubation'? "
+                f"(Their cool-down timer will reset.)",
+                parent=self):
+                moved = db.uncool_trays(inc_id)
+                messagebox.showinfo("Trays back in Incubation",
+                    f"Moved {moved} tray(s) back to Incubation.", parent=self)
 
     def _bulk_set_status(self):
         """Change status on all currently selected trays in the Trays tab."""
