@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.8.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.8.2"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -3068,29 +3068,29 @@ class IncubationApp(ctk.CTk):
                    on_save=lambda: self._refresh_current())
 
     def _sync_trays_to_mode(self, inc_id: int, new_key: str, prev_key: str):
-        """Offer to move trays when an incubator enters or leaves Cool Storage:
-        - entering Cool Storage: Incubation -> Cooled (start cool-down timer)
-        - leaving Cool Storage:  Cooled -> Incubation (resume incubation)
+        """Offer to move trays when an incubator changes into Holding or Incubation:
+        - into Holding:    Incubation -> Cooled (start cool-down / hold timer)
+        - into Incubation: Cooled -> Incubation (resume incubation)
         """
-        entering = new_key == "cool_storage" and prev_key != "cool_storage"
-        leaving  = prev_key == "cool_storage" and new_key != "cool_storage"
+        if new_key == prev_key:
+            return
 
-        if entering:
+        if new_key == "holding":
             n = db.count_active_trays(inc_id)
             if n and messagebox.askyesno(
                 "Move trays to Cooled?",
-                f"This incubator was switched to Cool Storage.\n\n"
+                f"This incubator was switched to Holding.\n\n"
                 f"Move its {n} tray(s) currently in incubation to 'Cooled' and "
                 f"start their cool-down timer (today's date)?",
                 parent=self):
                 moved = db.cool_trays(inc_id)
                 messagebox.showinfo("Trays Cooled",
                     f"Moved {moved} tray(s) to Cooled.", parent=self)
-        elif leaving:
+        elif new_key == "incubation":
             n = db.count_cooled_trays(inc_id)
             if n and messagebox.askyesno(
-                "Move trays back to Incubation?",
-                f"This incubator was switched out of Cool Storage.\n\n"
+                "Move trays to Incubation?",
+                f"This incubator was switched to Incubation.\n\n"
                 f"Move its {n} cooled tray(s) back to 'Incubation'? "
                 f"(Their cool-down timer will reset.)",
                 parent=self):
