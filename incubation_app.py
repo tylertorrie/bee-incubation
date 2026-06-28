@@ -861,6 +861,21 @@ class IncubationApp(ctk.CTk):
         # Apply logo icon to title bar and taskbar
         _app_dir  = os.path.dirname(os.path.abspath(__file__))
         _ico_path = os.path.join(_app_dir, "bee.ico")
+        _icon_src = os.path.join(_app_dir, "app_icon.png")
+        # Rebuild bee.ico from the committed source if it's missing or stale, so the
+        # window icon stays in sync on every machine after a git pull (bee.ico itself
+        # is gitignored / generated per-machine).
+        try:
+            if os.path.exists(_icon_src) and (
+                    not os.path.exists(_ico_path)
+                    or os.path.getmtime(_icon_src) > os.path.getmtime(_ico_path)):
+                from PIL import Image as _IcoImg
+                _IcoImg.open(_icon_src).convert("RGBA").resize(
+                    (256, 256), _IcoImg.LANCZOS).save(
+                    _ico_path, format="ICO",
+                    sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])
+        except Exception:
+            pass
         if os.path.exists(_ico_path):
             try:
                 self.iconbitmap(_ico_path)
@@ -886,6 +901,7 @@ class IncubationApp(ctk.CTk):
         # Build all views (hidden until selected)
         self._views = {}
         self._views["dashboard"]    = self._build_dashboard()
+        self._views["incubators"]   = self._build_incubators_view()
         self._views["samples"]      = self._build_samples_view()
         self._views["trays"]        = self._build_trays_view()
         self._views["timeline"]     = self._build_timeline_view()
@@ -941,6 +957,7 @@ class IncubationApp(ctk.CTk):
 
         nav_items = [
             ("🏠  Dashboard",     "dashboard"),
+            ("🌡️  Incubators",    "incubators"),
             ("🧪  Samples",       "samples"),
             ("📦  Trays",         "trays"),
             ("📅  Timeline",      "timeline"),
@@ -1044,8 +1061,11 @@ class IncubationApp(ctk.CTk):
         show_hidden = getattr(self, "_dash_show_hidden", None)
         show_hidden = show_hidden.get() if show_hidden else False
         all_inc     = db.get_incubators(include_hidden=True)
-        hidden_n    = sum(1 for i in all_inc if i.get("is_hidden"))
-        incubators  = all_inc if show_hidden else [i for i in all_inc if not i.get("is_hidden")]
+        # Dashboard shows only incubators that are turned ON (temp_mode != "off").
+        # Off ones live in the Incubators view, where they can be turned back on.
+        on_inc      = [i for i in all_inc if not calc.is_off(i)]
+        hidden_n    = sum(1 for i in on_inc if i.get("is_hidden"))
+        incubators  = on_inc if show_hidden else [i for i in on_inc if not i.get("is_hidden")]
 
         # Update the "show/hide hidden" button visibility and label
         if hidden_n > 0:
@@ -1176,7 +1196,10 @@ class IncubationApp(ctk.CTk):
         lbl_dot = _label(hdr, "●", ("Segoe UI", 18), dot_color)
         lbl_dot.pack(side="right")
 
-        # ── Large temp / humidity boxes ──
+        # ── Large temp / humidity boxes (with per-mode goals) ──
+        unit_g          = db.get_setting("temp_unit", "C")
+        goal_t, goal_h  = db.get_mode_goals(inc.get("temp_mode", "incubation"))
+
         sensor_row = ctk.CTkFrame(card, fg_color="transparent")
         sensor_row.pack(fill="x", padx=12, pady=(0, 8))
         sensor_row.columnconfigure(0, weight=1)
@@ -1186,13 +1209,17 @@ class IncubationApp(ctk.CTk):
         tf.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
         _label(tf, "Temp", FONT_S, SUBTEXT).pack(pady=(8, 0))
         lbl_temp = _label(tf, t_str if temp_c is not None else "—", ("Segoe UI", 22, "bold"), t_col)
-        lbl_temp.pack(pady=(2, 8))
+        lbl_temp.pack(pady=(2, 0))
+        _label(tf, f"Goal {calc.format_temp(goal_t, unit_g)}" if goal_t is not None else "—",
+               FONT_S, SUBTEXT).pack(pady=(0, 8))
 
         hf = ctk.CTkFrame(sensor_row, fg_color=CARD2, corner_radius=8)
         hf.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
         _label(hf, "Humidity", FONT_S, SUBTEXT).pack(pady=(8, 0))
         lbl_hum = _label(hf, f"{hum:.0f}%" if hum is not None else "—", ("Segoe UI", 22, "bold"), h_col)
-        lbl_hum.pack(pady=(2, 8))
+        lbl_hum.pack(pady=(2, 0))
+        _label(hf, f"Goal {goal_h:.0f}%" if goal_h is not None else "—",
+               FONT_S, SUBTEXT).pack(pady=(0, 8))
 
         # ── Bottom row: status/events left, tray info right ──
         bottom = ctk.CTkFrame(card, fg_color="transparent")
@@ -1226,8 +1253,8 @@ class IncubationApp(ctk.CTk):
         _label(right, f"{_ts['count']} / {capacity} trays", FONT_S, TEXT).pack(anchor="e")
         _label(right, f"{fill_pct}% filled  •  {_ts['total_gals']:.1f} gal", FONT_S, SUBTEXT).pack(anchor="e")
 
-        # ── Inspection badges ──
-        if not is_hidden:
+        # ── Inspection badges (hidden when the incubator is off — no inspections needed) ──
+        if not is_hidden and not calc.is_off(inc):
             brow = ctk.CTkFrame(card, fg_color="transparent")
             brow.pack(fill="x", padx=12, pady=(2, 10))
             _label(brow, "Inspections:", FONT_S, SUBTEXT).pack(side="left", padx=(2, 6))
@@ -1235,7 +1262,7 @@ class IncubationApp(ctk.CTk):
                 brow, inc["id"],
                 on_click=lambda p, i=inc: self._open_inspection_form(i)).pack(side="left")
         else:
-            # Hidden cards just need bottom padding
+            # Hidden / off cards just need bottom padding
             ctk.CTkFrame(card, fg_color="transparent", height=6).pack()
 
         # Whole card is clickable — navigates to detail.
@@ -1320,16 +1347,41 @@ class IncubationApp(ctk.CTk):
 
             _mode_key = inc.get("temp_mode", "incubation")
             _mode_cfg = calc.TEMP_MODES.get(_mode_key, calc.TEMP_MODES["incubation"])
-            info_txt = (f"Capacity: {inc.get('capacity',50)} trays  |  "
-                        f"{_mode_cfg['label']}: {_mode_cfg['min']}–{_mode_cfg['max']}°C")
+            if _mode_cfg["min"] is None:
+                _range_txt = f"{_mode_cfg['label']} (no alerts)"
+            else:
+                _range_txt = f"{_mode_cfg['label']}: {_mode_cfg['min']}–{_mode_cfg['max']}°C"
+            info_txt = f"Capacity: {inc.get('capacity',50)} trays  |  {_range_txt}"
             _label(left, info_txt, FONT_S, SUBTEXT).pack(anchor="w")
+
+            # Per-mode temperature / humidity goals
+            _gt, _gh = db.get_mode_goals(_mode_key)
+            if _gt is not None or _gh is not None:
+                _ug = db.get_setting("temp_unit", "C")
+                _bits = []
+                if _gt is not None: _bits.append(f"🌡 {calc.format_temp(_gt, _ug)}")
+                if _gh is not None: _bits.append(f"💧 {_gh:.0f}%")
+                _label(left, "Goal:  " + "    ".join(_bits), FONT_S, SUBTEXT).pack(anchor="w")
 
             govee_txt = (f"Govee: {inc.get('govee_device_id') or 'not set'}  "
                          f"({inc.get('govee_sku') or '—'})")
             _label(left, govee_txt, FONT_S, SUBTEXT).pack(anchor="w")
 
-            # Inspection status badges (only for visible incubators)
-            if not hidden:
+            # Temp-mode selector — turn the incubator on/off and pick its mode here
+            mode_row = ctk.CTkFrame(left, fg_color="transparent")
+            mode_row.pack(anchor="w", pady=(6, 0))
+            _label(mode_row, "Temp Mode:", FONT_S, SUBTEXT).pack(side="left", padx=(0, 6))
+            _mode_var = ctk.StringVar(value=_mode_cfg["label"])
+            ctk.CTkSegmentedButton(
+                mode_row,
+                values=[v["label"] for v in calc.TEMP_MODES.values()],
+                variable=_mode_var,
+                command=lambda label, iid=inc["id"]: self._set_inc_mode(iid, label),
+                height=26, font=FONT_S,
+            ).pack(side="left")
+
+            # Inspection status badges (only for visible, non-off incubators)
+            if not hidden and not calc.is_off(inc):
                 ibrow = ctk.CTkFrame(left, fg_color="transparent")
                 ibrow.pack(anchor="w", pady=(4, 0))
                 _label(ibrow, "Inspections:", FONT_S, SUBTEXT).pack(side="left", padx=(0, 6))
@@ -1344,10 +1396,11 @@ class IncubationApp(ctk.CTk):
                      width=80, height=28, fg="#065F46", hover=TEAL,
                      text_color="white").pack(pady=2)
             else:
-                _btn(right, "Inspect",
-                     lambda i=inc: self._open_inspection_form(i),
-                     width=80, height=28, fg=BLUE, hover="#1D4ED8",
-                     text_color="white").pack(pady=2)
+                if not calc.is_off(inc):
+                    _btn(right, "Inspect",
+                         lambda i=inc: self._open_inspection_form(i),
+                         width=80, height=28, fg=BLUE, hover="#1D4ED8",
+                         text_color="white").pack(pady=2)
                 _btn(right, "Hide",
                      lambda i=inc["id"]: self._set_hidden(i, True),
                      width=80, height=28, fg=CARD2, hover=BORDER,
@@ -1762,6 +1815,30 @@ class IncubationApp(ctk.CTk):
         self._set["temp_unit"] = _FormRow(pf, 2, "Temp Unit",
             widget=_combo(pf, ["C", "F"], 80))
 
+        # Temperature Mode Goals — target temp/humidity per mode
+        tmg = section("Temperature Mode Goals")
+        _label(tmg,
+               "Target temperature (°C) and humidity (%) for each mode. Shown on\n"
+               "incubator tiles and drawn as dotted goal lines on the charts.",
+               FONT_S, SUBTEXT).grid(row=0, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
+        _label(tmg, "Mode",       FONT_S, SUBTEXT).grid(row=1, column=0, sticky="w", padx=4)
+        _label(tmg, "Temp °C",    FONT_S, SUBTEXT).grid(row=1, column=1, sticky="w", padx=4)
+        _label(tmg, "Humidity %", FONT_S, SUBTEXT).grid(row=1, column=2, sticky="w", padx=4)
+        self._goal_entries = {}
+        for _ri, _mk in enumerate(calc.ACTIVE_MODES, start=2):
+            _gt, _gh = db.get_mode_goals(_mk)
+            _label(tmg, calc.TEMP_MODES[_mk]["label"], FONT_B, TEXT).grid(
+                row=_ri, column=0, sticky="w", padx=4, pady=3)
+            _te = ctk.CTkEntry(tmg, width=80, fg_color=CARD2,
+                               border_color=BORDER, text_color=TEXT)
+            _te.grid(row=_ri, column=1, sticky="w", padx=4, pady=3)
+            _te.insert(0, "" if _gt is None else f"{_gt:g}")
+            _he = ctk.CTkEntry(tmg, width=80, fg_color=CARD2,
+                               border_color=BORDER, text_color=TEXT)
+            _he.grid(row=_ri, column=2, sticky="w", padx=4, pady=3)
+            _he.insert(0, "" if _gh is None else f"{_gh:g}")
+            self._goal_entries[_mk] = (_te, _he)
+
         # Calculation
         cf = section("Weight Calculations")
         self._set["lbs_per_gal"] = _FormRow(cf, 0, "Lbs per Gallon (raw cells)", "2.2", 100)
@@ -1884,6 +1961,11 @@ class IncubationApp(ctk.CTk):
         self._email_recip_box.delete("1.0", "end")
         if recip_val:
             self._email_recip_box.insert("1.0", recip_val)
+        # Reload per-mode goals (in case another computer changed them)
+        for _mk, (_te, _he) in getattr(self, "_goal_entries", {}).items():
+            _gt, _gh = db.get_mode_goals(_mk)
+            _te.delete(0, "end"); _te.insert(0, "" if _gt is None else f"{_gt:g}")
+            _he.delete(0, "end"); _he.insert(0, "" if _gh is None else f"{_gh:g}")
 
     def _save_settings(self):
         keys = ["govee_api_key", "date_alert_lookahead",
@@ -1897,6 +1979,9 @@ class IncubationApp(ctk.CTk):
         # Save recipients
         recip_text = self._email_recip_box.get("1.0", "end").strip()
         db.set_setting("email_recipients", recip_text)
+        # Per-mode temperature/humidity goals
+        for _mk, (_te, _he) in getattr(self, "_goal_entries", {}).items():
+            db.set_mode_goals(_mk, _te.get().strip(), _he.get().strip())
         # Update govee key live
         self._govee.set_api_key(db.get_setting("govee_api_key"))
         messagebox.showinfo("Settings", "Settings saved.", parent=self)
@@ -2444,6 +2529,15 @@ class IncubationApp(ctk.CTk):
                     _hi = calc.c_to_f(t_max) if unit == "F" else t_max
                     ax1.axhline(_lo, color="#EF4444", linewidth=0.8, linestyle=":")
                     ax1.axhline(_hi, color="#EF4444", linewidth=0.8, linestyle=":")
+
+                # Dotted goal lines — temp goal in the temp colour, humidity goal in
+                # the humidity colour (matches each data line).
+                goal_t, goal_h = db.get_mode_goals(fresh.get("temp_mode", "incubation"))
+                if goal_t is not None:
+                    _gt = calc.c_to_f(goal_t) if unit == "F" else goal_t
+                    ax1.axhline(_gt, color="#FFD700", linewidth=1.1, linestyle=":")
+                if goal_h is not None:
+                    ax2.axhline(goal_h, color="#60A5FA", linewidth=1.1, linestyle=":")
 
                 for ax in (ax1, ax2):
                     ax.set_facecolor("#1F2937")
@@ -3192,6 +3286,19 @@ class IncubationApp(ctk.CTk):
         db.set_incubator_hidden(iid, hidden)
         self._refresh_current()
 
+    def _set_inc_mode(self, iid: int, label: str):
+        """Set an incubator's temp mode from a selector (e.g. the Incubators view)."""
+        key  = calc._MODE_BY_LABEL.get(label, "incubation")
+        prev = next((x for x in db.get_incubators(include_hidden=True)
+                     if x["id"] == iid), {}).get("temp_mode", "incubation")
+        db.set_incubator_temp_mode(iid, key)
+        self._sync_trays_to_mode(iid, key, prev)
+        self._refresh_current()
+
+    def _after_inspection_saved(self):
+        """After saving an inspection, jump back to the dashboard."""
+        self.show_view("dashboard")
+
     def _toggle_temp_alerts(self, inc: dict):
         new_val = not bool(inc.get("temp_alerts_enabled", 1))
         db.set_incubator_alerts_enabled(inc["id"], new_val)
@@ -3206,7 +3313,7 @@ class IncubationApp(ctk.CTk):
         govee_tmp = reading.get("temp_c")
         InspectionDialog(
             self, inc, govee_temp_c=govee_tmp,
-            on_save=self._refresh_current,
+            on_save=self._after_inspection_saved,
         )
 
     # ══════════════════════════════════════════════════════════════════════════

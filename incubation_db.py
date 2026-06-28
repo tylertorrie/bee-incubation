@@ -349,10 +349,40 @@ def set_incubator_hidden(incubator_id: int, hidden: bool):
 
 
 def set_incubator_temp_mode(incubator_id: int, mode: str):
-    """Switch temp mode for an incubator ('cool_storage'|'incubation'|'holding')."""
+    """Switch temp mode for an incubator ('off'|'cool_storage'|'incubation'|'holding')."""
     with get_conn() as conn:
         conn.execute("UPDATE incubators SET temp_mode=? WHERE id=?",
                      (mode, incubator_id))
+
+
+def get_mode_goals(mode: str) -> tuple:
+    """Return (goal_temp_c, goal_humidity_pct) for a temp mode.
+
+    Uses the per-mode override stored in settings if set, otherwise the built-in
+    default from incubation_calc.TEMP_MODES. Returns (None, None) for 'off'.
+    """
+    import incubation_calc as calc
+    def_t, def_h = calc.get_mode_goal_defaults(mode)
+
+    def _resolve(key, fallback):
+        raw = get_setting(key, "")
+        if raw in ("", None):
+            return fallback
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return fallback
+
+    return (_resolve(f"goal_temp_{mode}",     def_t),
+            _resolve(f"goal_humidity_{mode}", def_h))
+
+
+def set_mode_goals(mode: str, goal_temp, goal_humidity):
+    """Persist per-mode temperature & humidity goals. Blank/None clears the override."""
+    set_setting(f"goal_temp_{mode}",
+                "" if goal_temp in (None, "") else goal_temp)
+    set_setting(f"goal_humidity_{mode}",
+                "" if goal_humidity in (None, "") else goal_humidity)
 
 
 def set_incubator_alerts_enabled(incubator_id: int, enabled: bool):

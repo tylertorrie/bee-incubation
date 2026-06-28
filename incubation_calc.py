@@ -150,14 +150,26 @@ def get_all_events(batches: list, lookahead_days: int = 30) -> list:
 # ── Temperature mode presets ──────────────────────────────────────────────────
 
 TEMP_MODES = {
-    "off":          {"label": "Off",            "min": None, "max": None},
-    "cool_storage": {"label": "Cool Storage",  "min":  0.0, "max": 12.0},
-    "incubation":   {"label": "Incubation",     "min": 25.0, "max": 35.0},
-    "holding":      {"label": "Holding Temp",   "min": 10.0, "max": 18.0},
+    "off":          {"label": "Off",            "min": None, "max": None,
+                     "goal_temp": None, "goal_humidity": None},
+    "cool_storage": {"label": "Cool Storage",  "min":  0.0, "max": 12.0,
+                     "goal_temp":  4.0, "goal_humidity": 50.0},
+    "incubation":   {"label": "Incubation",     "min": 25.0, "max": 35.0,
+                     "goal_temp": 30.0, "goal_humidity": 65.0},
+    "holding":      {"label": "Holding Temp",   "min": 10.0, "max": 18.0,
+                     "goal_temp": 14.0, "goal_humidity": 60.0},
 }
 
 # Reverse lookup: display label → mode key
 _MODE_BY_LABEL = {v["label"]: k for k, v in TEMP_MODES.items()}
+
+# Mode keys that count as "active" (shown on the dashboard, inspections needed).
+ACTIVE_MODES = [k for k in TEMP_MODES if k != "off"]
+
+
+def is_off(incubator: dict) -> bool:
+    """True when the incubator is turned off (temp_mode == 'off')."""
+    return (incubator.get("temp_mode") or "incubation") == "off"
 
 
 def get_temp_range(incubator: dict) -> tuple:
@@ -165,6 +177,12 @@ def get_temp_range(incubator: dict) -> tuple:
     mode = incubator.get("temp_mode") or "incubation"
     cfg  = TEMP_MODES.get(mode, TEMP_MODES["incubation"])
     return cfg["min"], cfg["max"]
+
+
+def get_mode_goal_defaults(mode: str) -> tuple:
+    """Return the built-in (goal_temp_c, goal_humidity_pct) for a mode, or (None, None)."""
+    cfg = TEMP_MODES.get(mode, {})
+    return cfg.get("goal_temp"), cfg.get("goal_humidity")
 
 
 # ── Threshold checks ──────────────────────────────────────────────────────────

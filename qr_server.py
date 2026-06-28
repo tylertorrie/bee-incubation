@@ -284,10 +284,22 @@ def _dashboard_data() -> dict:
     unit = db.get_setting("temp_unit", "C")
     incs = []
     for inc in db.get_incubators():
+        # Dashboard shows only incubators that are turned ON (temp_mode != "off").
+        if calc and calc.is_off(inc):
+            continue
         row    = db.get_latest_reading(inc["id"])
         temp_c = row["temperature_c"] if row else None
         hum    = row["humidity_pct"]  if row else None
         ts     = row["timestamp"]     if row else None
+
+        goal_t, goal_h = db.get_mode_goals(inc.get("temp_mode", "incubation"))
+        if goal_t is None:
+            goal_temp_str = "—"
+        elif calc:
+            goal_temp_str = calc.format_temp(goal_t, unit)
+        else:
+            goal_temp_str = f"{goal_t:.1f}°{unit}"
+        goal_hum_str = f"{goal_h:.0f}%" if goal_h is not None else "—"
 
         t_min, t_max = (calc.get_temp_range(inc) if calc else (None, None))
         if temp_c is None:
@@ -310,6 +322,8 @@ def _dashboard_data() -> dict:
             "temp":         temp_str,
             "temp_color":   temp_col,
             "humidity":     f"{hum:.0f}%" if hum is not None else "—",
+            "goal_temp":    goal_temp_str,
+            "goal_humidity": goal_hum_str,
             "last_polled":  poll_txt,
             "poll_color":   poll_col,
             "trays":        stats["count"],
@@ -328,9 +342,11 @@ def _dashboard_card_html(i: dict) -> str:
         f'<div class="cn">{i["name"]}</div>'
         '<div class="metrics">'
         f'<div class="metric"><div class="ml">Temp</div>'
-        f'<div class="mv" style="color:{i["temp_color"]}">{i["temp"]}</div></div>'
+        f'<div class="mv" style="color:{i["temp_color"]}">{i["temp"]}</div>'
+        f'<div style="font-size:.7rem;color:#9CA3AF">Goal {i["goal_temp"]}</div></div>'
         f'<div class="metric"><div class="ml">Humidity</div>'
-        f'<div class="mv">{i["humidity"]}</div></div>'
+        f'<div class="mv">{i["humidity"]}</div>'
+        f'<div style="font-size:.7rem;color:#9CA3AF">Goal {i["goal_humidity"]}</div></div>'
         '</div>'
         f'<div class="meta" style="color:{i["poll_color"]}">● Last polled: {i["last_polled"]}</div>'
         f'<div class="meta">{i["trays"]} / {i["capacity"]} trays</div>'
@@ -364,8 +380,8 @@ def _dashboard_body() -> str:
         '      "<a href=\\"/m/incubator/"+i.id+"\\" style=\\"text-decoration:none;color:inherit;display:block\\">"+'
         '      "<div class=\\"cn\\">"+i.name+"</div>"+'
         '      "<div class=\\"metrics\\">"+'
-        '        "<div class=\\"metric\\"><div class=\\"ml\\">Temp</div><div class=\\"mv\\" style=\\"color:"+i.temp_color+"\\">"+i.temp+"</div></div>"+'
-        '        "<div class=\\"metric\\"><div class=\\"ml\\">Humidity</div><div class=\\"mv\\">"+i.humidity+"</div></div>"+'
+        '        "<div class=\\"metric\\"><div class=\\"ml\\">Temp</div><div class=\\"mv\\" style=\\"color:"+i.temp_color+"\\">"+i.temp+"</div><div style=\\"font-size:.7rem;color:#9CA3AF\\">Goal "+i.goal_temp+"</div></div>"+'
+        '        "<div class=\\"metric\\"><div class=\\"ml\\">Humidity</div><div class=\\"mv\\">"+i.humidity+"</div><div style=\\"font-size:.7rem;color:#9CA3AF\\">Goal "+i.goal_humidity+"</div></div>"+'
         '      "</div>"+'
         '      "<div class=\\"meta\\" style=\\"color:"+i.poll_color+"\\">\\u25CF Last polled: "+i.last_polled+"</div>"+'
         '      "<div class=\\"meta\\">"+i.trays+" / "+i.capacity+" trays</div></a>"+'
@@ -383,8 +399,12 @@ def _dashboard_body() -> str:
     )
 
 
-def _svg_chart(readings: list, unit: str, t_min, t_max) -> str:
-    """Self-contained inline SVG temp+humidity chart (no JS library)."""
+def _svg_chart(readings: list, unit: str, t_min, t_max,
+               goal_t=None, goal_h=None) -> str:
+    """Self-contained inline SVG temp+humidity chart (no JS library).
+
+    goal_t/goal_h (Celsius / %) draw dotted goal lines matching each data line.
+    """
     from datetime import datetime
     W, H = 360, 210
     padL, padR, padT, padB = 6, 6, 10, 4
@@ -421,11 +441,17 @@ def _svg_chart(readings: list, unit: str, t_min, t_max) -> str:
             lo, hi = lo * 9 / 5 + 32, hi * 9 / 5 + 32
         band_lo, band_hi = lo, hi
         tlo, thi = min(tlo, lo), max(thi, hi)
+    goal_t_disp = None
+    if goal_t is not None:
+        goal_t_disp = goal_t * 9 / 5 + 32 if unit == "F" else goal_t
+        tlo, thi = min(tlo, goal_t_disp), max(thi, goal_t_disp)
     if thi == tlo:
         thi = tlo + 1
     pad = (thi - tlo) * 0.12; tlo -= pad; thi += pad
     hlo = min(hvals) if hvals else 0
     hhi = max(hvals) if hvals else 100
+    if goal_h is not None:
+        hlo, hhi = min(hlo, goal_h), max(hhi, goal_h)
     if hhi == hlo:
         hhi = hlo + 1
     hpad = (hhi - hlo) * 0.12; hlo -= hpad; hhi += hpad
@@ -440,13 +466,24 @@ def _svg_chart(readings: list, unit: str, t_min, t_max) -> str:
         band = (f'<rect x="{padL}" y="{y1:.1f}" width="{plotW}" '
                 f'height="{max(0,y2-y1):.1f}" fill="#EF4444" opacity="0.10"/>')
 
+    # Dotted goal lines — temp goal in gold, humidity goal in blue (match data lines)
+    goal_lines = ""
+    if goal_t_disp is not None:
+        gy = Yt(goal_t_disp)
+        goal_lines += (f'<line x1="{padL}" y1="{gy:.1f}" x2="{padL+plotW}" y2="{gy:.1f}" '
+                       f'stroke="#FFD700" stroke-width="1.2" stroke-dasharray="1,3"/>')
+    if goal_h is not None:
+        gyh = Yh(goal_h)
+        goal_lines += (f'<line x1="{padL}" y1="{gyh:.1f}" x2="{padL+plotW}" y2="{gyh:.1f}" '
+                       f'stroke="#60A5FA" stroke-width="1.2" stroke-dasharray="1,3"/>')
+
     temp_pts = " ".join(f"{X(t):.1f},{Yt(v):.1f}" for t, v, _ in pts if v is not None)
     hum_pts  = " ".join(f"{X(t):.1f},{Yh(v):.1f}" for t, _, v in pts if v is not None)
 
     return (
         f'<svg viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="none" '
         f'style="background:#111827;border-radius:10px">'
-        + band +
+        + band + goal_lines +
         f'<polyline points="{hum_pts}" fill="none" stroke="#60A5FA" '
         f'stroke-width="1.4" stroke-dasharray="3,3" opacity="0.85"/>'
         f'<polyline points="{temp_pts}" fill="none" stroke="#FFD700" stroke-width="2"/>'
@@ -490,8 +527,17 @@ def _incubator_detail_body(inc_id: int, hours: int) -> str:
     hum_str = f"{hum:.0f}%" if hum is not None else "—"
     poll_txt, poll_col = _mobile_poll_age(ts)
 
+    goal_t, goal_h = db.get_mode_goals(inc.get("temp_mode", "incubation"))
+    if goal_t is None:
+        goal_temp_str = "—"
+    elif calc:
+        goal_temp_str = calc.format_temp(goal_t, unit)
+    else:
+        goal_temp_str = f"{goal_t:.1f}°{unit}"
+    goal_hum_str = f"{goal_h:.0f}%" if goal_h is not None else "—"
+
     readings = db.get_readings_hours(inc_id, hours)
-    chart    = _svg_chart(readings, unit, t_min, t_max)
+    chart    = _svg_chart(readings, unit, t_min, t_max, goal_t, goal_h)
 
     ranges = [("1H", 1), ("6H", 6), ("24H", 24), ("7D", 24 * 7), ("30D", 24 * 30)]
     rbtns = "".join(
@@ -509,6 +555,16 @@ def _incubator_detail_body(inc_id: int, hours: int) -> str:
         am = st.get("morning") == "done"
         pm = st.get("evening") == "done"
 
+    # Off incubators don't need inspections — hide the AM/PM pills.
+    if calc and calc.is_off(inc):
+        pills_html = ('<div class="meta" style="margin-top:8px">'
+                      'Turned off — no inspections needed.</div>')
+    else:
+        pills_html = ('<div class="bp">'
+                      + _pill_html("AM", "🌅", am, href=f"/m/inspect/{inc_id}")
+                      + _pill_html("PM", "🌙", pm, href=f"/m/inspect/{inc_id}")
+                      + '</div>')
+
     return (
         '<div class="topbar">'
         f'<h1>{inc["name"]}</h1>'
@@ -517,15 +573,14 @@ def _incubator_detail_body(inc_id: int, hours: int) -> str:
         '<div class="card">'
         '<div class="metrics">'
         f'<div class="metric"><div class="ml">Temp</div>'
-        f'<div class="mv" style="color:{temp_col}">{temp_str}</div></div>'
+        f'<div class="mv" style="color:{temp_col}">{temp_str}</div>'
+        f'<div style="font-size:.7rem;color:#9CA3AF">Goal {goal_temp_str}</div></div>'
         f'<div class="metric"><div class="ml">Humidity</div>'
-        f'<div class="mv">{hum_str}</div></div>'
+        f'<div class="mv">{hum_str}</div>'
+        f'<div style="font-size:.7rem;color:#9CA3AF">Goal {goal_hum_str}</div></div>'
         '</div>'
         f'<div class="meta" style="color:{poll_col}">● Last polled: {poll_txt}</div>'
-        '<div class="bp">'
-        + _pill_html("AM", "🌅", am, href=f"/m/inspect/{inc_id}")
-        + _pill_html("PM", "🌙", pm, href=f"/m/inspect/{inc_id}") +
-        '</div>'
+        + pills_html +
         '</div>'
         '<div class="card">'
         f'<div style="display:flex;gap:8px;margin-bottom:10px">{rbtns}</div>'
@@ -1671,7 +1726,8 @@ def _make_flask_app():
         _commit_pending_trays(new_id, inc_id, request.form.get("pending_trays"))
         if _on_update:
             _on_update(None)
-        return redirect(f"/m/inspection/{new_id}?saved=1")
+        # Auto-return to the dashboard after saving an inspection.
+        return redirect("/?saved=1")
 
     @app.route("/m/inspection/<int:insp_id>")
     def mobile_inspection_report(insp_id):
