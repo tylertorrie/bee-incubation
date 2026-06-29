@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.11.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.11.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -1041,17 +1041,20 @@ class IncubationApp(ctk.CTk):
             command=self._toggle_dash_hidden)
         # packed conditionally in _refresh_dashboard
 
-        # Body: card area (left) + incubator mode panel (right)
+        # Body: card area (left, expands) + incubator mode panel (right, flush)
         body = ctk.CTkFrame(frame, fg_color="transparent")
         body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)   # cards stretch to fill
+        body.columnconfigure(1, weight=0)   # mode panel fixed width
+        body.rowconfigure(0, weight=1)
 
         self._dash_scroll = ctk.CTkScrollableFrame(
             body, fg_color="transparent", corner_radius=0)
-        self._dash_scroll.pack(side="left", fill="both", expand=True, padx=(12, 6), pady=4)
+        self._dash_scroll.grid(row=0, column=0, sticky="nsew", padx=(12, 6), pady=4)
 
-        mode_col = ctk.CTkFrame(body, fg_color=CARD, width=360, corner_radius=10)
-        mode_col.pack(side="right", fill="y", padx=(0, 12), pady=4)
-        mode_col.pack_propagate(False)
+        mode_col = ctk.CTkFrame(body, fg_color=CARD, width=340, corner_radius=10)
+        mode_col.grid(row=0, column=1, sticky="ns", padx=(0, 12), pady=4)
+        mode_col.grid_propagate(False)
         _label(mode_col, "Incubator Modes", FONT_H, GOLD).pack(
             anchor="w", padx=14, pady=(12, 6))
         self._dash_mode_panel = ctk.CTkScrollableFrame(mode_col, fg_color="transparent")
