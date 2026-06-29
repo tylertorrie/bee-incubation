@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.11.8"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.11.9"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -3590,13 +3590,21 @@ class IncubationApp(ctk.CTk):
         inc = next((i for i in incubators if i["id"] == incubator_id), None)
         if inc and inc.get("temp_alerts_enabled", 1):
             problems = calc.check_temp_humidity(inc, temp_c, humidity)
-            for msg in problems:
-                # One standing alert per incubator+problem-type; suppress the
-                # per-minute repeats while the condition persists.
-                kind = "humidity" if "humid" in msg.lower() else "temp"
-                db.add_alert("temp_humidity", msg, severity="warning",
-                             incubator_id=incubator_id,
-                             dedup_key=f"temp_humidity:{kind}:{incubator_id}")
+            if problems:
+                for msg in problems:
+                    # One standing alert per incubator+problem-type; suppress the
+                    # per-minute repeats while the condition persists.
+                    kind = "humidity" if "humid" in msg.lower() else "temp"
+                    db.add_alert("temp_humidity", msg, severity="warning",
+                                 incubator_id=incubator_id,
+                                 dedup_key=f"temp_humidity:{kind}:{incubator_id}")
+            else:
+                # Condition resolved — auto-acknowledge any standing temp/humidity
+                # alerts for this incubator so the red outline clears automatically.
+                db.auto_acknowledge_alerts([
+                    f"temp_humidity:temp:{incubator_id}",
+                    f"temp_humidity:humidity:{incubator_id}",
+                ])
 
         # Refresh UI on main thread
         self.after(0, self._on_reading_ui_refresh)

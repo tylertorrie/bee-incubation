@@ -1004,6 +1004,21 @@ def acknowledge_alert(alert_id: int):
         )
 
 
+def auto_acknowledge_alerts(dedup_keys: list[str]):
+    """Auto-resolve active alerts matching any of the given dedup_keys.
+    Called when a condition (e.g. temp back in range) has self-cleared."""
+    if not dedup_keys:
+        return
+    placeholders = ",".join("?" * len(dedup_keys))
+    now = datetime.now().isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE alerts SET acknowledged=1, acknowledged_at=? "
+            f"WHERE acknowledged=0 AND dedup_key IN ({placeholders})",
+            [now, *dedup_keys],
+        )
+
+
 def get_alerts_24h() -> list:
     """Return all alerts (any status) triggered in the past 24 hours."""
     cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
