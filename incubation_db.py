@@ -461,8 +461,9 @@ def upsert_sample_by_name(data: dict) -> int | None:
              "total_trays", "incubator_space", "notes", "import_date"}
     fields = [k for k in data if k in valid]
     with get_conn() as conn:
+        # Use TRIM so trailing/leading spaces in existing names don't prevent a match
         row = conn.execute(
-            "SELECT id FROM samples WHERE name=? COLLATE NOCASE", (name,)).fetchone()
+            "SELECT id FROM samples WHERE TRIM(name)=? COLLATE NOCASE", (name,)).fetchone()
         if row:
             sid = row["id"]
             if fields:
@@ -476,6 +477,66 @@ def upsert_sample_by_name(data: dict) -> int | None:
             f"INSERT INTO samples ({','.join(cols)}) VALUES ({','.join('?'*len(cols))})",
             vals)
         return cur.lastrowid
+
+
+def merge_duplicate_samples() -> int:
+    """Find samples whose names are identical (case-insensitive, trimmed) and
+    merge each group into one record.
+
+    The survivor is the record with the most non-NULL detail fields.
+    All trays, batches, and incubation_batches that reference a duplicate are
+    re-pointed to the survivor, then the duplicates are deleted.
+    Returns the number of duplicate records removed.
+    """
+    detail_cols = [
+        "source", "lot_number", "total_volume_gal", "total_weight_lbs",
+        "total_weight_kg", "live_bees_per_lb", "live_bees_per_kg",
+        "parasites", "chalkbrood", "kg_per_2gal", "lbs_per_2gal",
+        "total_trays", "incubator_space", "notes",
+    ]
+    removed = 0
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, name FROM samples ORDER BY id").fetchall()
+        # Group by normalised name
+        groups: dict[str, list[int]] = {}
+        for r in rows:
+            key = (r["name"] or "").strip().lower()
+            groups.setdefault(key, []).append(r["id"])
+
+        for ids in groups.values():
+            if len(ids) < 2:
+                continue
+            # Choose the survivor: the record with the most populated detail cols
+            def _score(sid):
+                s = conn.execute("SELECT * FROM samples WHERE id=?", (sid,)).fetchone()
+                if not s:
+                    return 0
+                return sum(1 for c in detail_cols if s[c] is not None)
+
+            ids_sorted = sorted(ids, key=_score, reverse=True)
+            survivor = ids_sorted[0]
+            duplicates = ids_sorted[1:]
+
+            # Copy any non-NULL fields from duplicates that the survivor is missing
+            s_row = dict(conn.execute("SELECT * FROM samples WHERE id=?", (survivor,)).fetchone())
+            for dup in duplicates:
+                d_row = dict(conn.execute("SELECT * FROM samples WHERE id=?", (dup,)).fetchone())
+                updates = {c: d_row[c] for c in detail_cols
+                           if s_row.get(c) is None and d_row.get(c) is not None}
+                if updates:
+                    sets = ", ".join(f"{c}=?" for c in updates)
+                    conn.execute(f"UPDATE samples SET {sets} WHERE id=?",
+                                 list(updates.values()) + [survivor])
+                    s_row.update(updates)
+
+            # Re-point all FK references to the survivor
+            for dup in duplicates:
+                conn.execute("UPDATE trays SET sample_id=? WHERE sample_id=?", (survivor, dup))
+                conn.execute("UPDATE batches SET sample_id=? WHERE sample_id=?", (survivor, dup))
+                conn.execute("DELETE FROM samples WHERE id=?", (dup,))
+                removed += 1
+
+    return removed
 
 
 def delete_sample(sample_id: int):

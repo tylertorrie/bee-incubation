@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.12.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.12.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -1517,6 +1517,8 @@ class IncubationApp(ctk.CTk):
         _label(hdr, "Samples & X-Ray Results", FONT_H, GOLD).pack(side="left")
         _btn(hdr, "Import Spreadsheet", self._import_xray,
              fg=BLUE, hover="#1D4ED8", text_color="white", width=160).pack(side="right")
+        _btn(hdr, "Merge Duplicates", self._merge_duplicate_samples,
+             fg="#7C3AED", hover="#6D28D9", text_color="white", width=140).pack(side="right", padx=6)
         _btn(hdr, "+ Add Sample", lambda: self._open_sample_dialog(),
              fg=CARD, hover=CARD2, width=130).pack(side="right", padx=6)
 
@@ -3452,6 +3454,33 @@ class IncubationApp(ctk.CTk):
                 )
         except Exception as exc:
             messagebox.showerror("Import Error", str(exc))
+
+    def _merge_duplicate_samples(self):
+        """Collapse same-name sample records and re-link their trays to the survivor."""
+        if not messagebox.askyesno(
+            "Merge Duplicate Samples",
+            "This will find samples with the same name (ignoring case and extra spaces), "
+            "merge their data into one record, and update all tray links.\n\nContinue?",
+            parent=self,
+        ):
+            return
+        try:
+            removed = db.merge_duplicate_samples()
+            if removed:
+                messagebox.showinfo(
+                    "Merge Complete",
+                    f"Merged and removed {removed} duplicate sample record(s).\n"
+                    "Tray links have been updated.",
+                    parent=self,
+                )
+                self._refresh_samples()
+            else:
+                messagebox.showinfo(
+                    "Merge Complete", "No duplicates found — all sample names are unique.",
+                    parent=self,
+                )
+        except Exception as exc:
+            messagebox.showerror("Merge Error", str(exc), parent=self)
 
     # Maps the field spreadsheet's headers (normalized) -> sample DB fields.
     _SAMPLE_HEADER_MAP = {
