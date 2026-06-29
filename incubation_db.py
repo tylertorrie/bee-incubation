@@ -385,6 +385,18 @@ def get_sample(sample_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+def get_tray_counts_by_sample(statuses=("active", "cooled")) -> dict:
+    """Return {sample_id: tray_count}. Counts in-incubator trays by default."""
+    q = "SELECT sample_id, COUNT(*) FROM trays WHERE sample_id IS NOT NULL"
+    params = []
+    if statuses:
+        q += " AND status IN (%s)" % ",".join("?" * len(statuses))
+        params.extend(statuses)
+    q += " GROUP BY sample_id"
+    with get_conn() as conn:
+        return {r[0]: r[1] for r in conn.execute(q, params).fetchall()}
+
+
 def upsert_sample(data: dict) -> int:
     cols = ["name", "source", "lot_number", "xray_live_pct", "xray_parasite_pct",
             "xray_dead_pct", "total_volume_gal", "total_weight_lbs",
@@ -490,6 +502,7 @@ def get_trays(incubator_id: int = None, sample_id: int = None,
     with get_conn() as conn:
         q = """SELECT t.*,
                       s.name AS sample_name,
+                      s.live_bees_per_lb AS sample_live_per_lb,
                       i.name AS incubator_name,
                       b.name AS batch_name
                FROM trays t
@@ -580,7 +593,9 @@ def find_trays(query: str, limit: int = 25) -> list:
         params.append(f"%{digits}%")
 
     sql = f"""
-        SELECT t.*, s.name AS sample_name, i.name AS incubator_name
+        SELECT t.*, s.name AS sample_name,
+               s.live_bees_per_lb AS sample_live_per_lb,
+               i.name AS incubator_name
         FROM trays t
         LEFT JOIN samples    s ON t.sample_id    = s.id
         LEFT JOIN incubators i ON t.incubator_id = i.id

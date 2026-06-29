@@ -224,9 +224,10 @@ def _nav_html(active: str) -> str:
         cls = "active" if key == active else ""
         return f'<a class="{cls}" href="{href}"><span class="ic">{icon}</span>{label}</a>'
     return ('<div class="nav">'
-            + item("home",    "/",             "🏠", "Dashboard")
+            + item("home",    "/",             "🏠", "Dash")
             + item("inspect", "/m/inspections", "🔍", "Inspect")
             + item("trays",   "/m/trays",       "📦", "Trays")
+            + item("samples", "/m/samples",     "🧪", "Samples")
             + '</div>')
 
 
@@ -1165,6 +1166,20 @@ def _tray_insp_form_body(insp_id: int, tray: dict, existing: dict = None) -> str
     cells_val = "" if cells_val is None else cells_val
     notes_val = cur.get("notes") or ""
 
+    # Sample reference card (so the inspector sees the sample's data)
+    sample = db.get_sample(tray.get("sample_id"))
+    sample_card = ""
+    if sample:
+        srows = _sample_detail_rows(sample)
+        if srows:
+            sample_card = (
+                '<div class="card"><div class="card-title">Sample — '
+                + str(sample.get("name") or "—") + '</div>'
+                + "".join(f'<div class="info-row"><span>{l}</span>'
+                          f'<span class="info-val">{v}</span></div>' for l, v in srows)
+                + '</div>'
+            )
+
     return (
         f'<div class="topbar"><h1>{title}</h1></div><div class="wrap">'
         '<div class="card">'
@@ -1172,6 +1187,7 @@ def _tray_insp_form_body(insp_id: int, tray: dict, existing: dict = None) -> str
         f'<div class="meta">{tray.get("sample_name") or "—"} · '
         f'{tray.get("incubator_name") or "—"}</div>'
         '</div>'
+        + sample_card +
         f'<form method="POST" action="{action}">'
         '<div class="card">'
         '<div class="fld"><label>Stack position</label>'
@@ -1244,6 +1260,84 @@ def _update_mobile_inspection(insp_id: int, form) -> Optional[int]:
         except Exception:
             pass
     return existing.get("incubator_id")
+
+
+def _samples_list_body() -> str:
+    """Samples tab: search/filter + one card per sample with key stats."""
+    counts = db.get_tray_counts_by_sample()
+    samples = db.get_samples()
+    parts = [
+        '<div class="topbar"><h1>🧪 Samples</h1></div><div class="wrap">'
+        '<div class="fld" style="margin-bottom:12px">'
+        '<input type="search" id="q" placeholder="Filter samples…" '
+        'autocapitalize="off" autocorrect="off" spellcheck="false" '
+        'autocomplete="off" oninput="filt()"></div>'
+        f'<div class="meta" id="cnt" style="margin:0 4px 10px">{len(samples)} samples</div>'
+        '<div id="list">'
+    ]
+    if samples:
+        for s in samples:
+            lpl = s.get("live_bees_per_lb")
+            lpl_txt = f"{lpl:,.0f}/lb" if isinstance(lpl, (int, float)) else "—"
+            ntrays = counts.get(s["id"], 0)
+            key = str(s["name"]).lower().replace('"', "")
+            parts.append(
+                f'<a class="trow" href="/m/sample/{s["id"]}" data-s="{key}">'
+                f'<div><div class="tn">{s["name"]}</div>'
+                f'<div class="ts">{lpl_txt} · {ntrays} trays</div></div>'
+                '<div class="tg" style="color:#9CA3AF">›</div></a>'
+            )
+    else:
+        parts.append('<div class="card"><div class="soon">No samples yet.</div></div>')
+    parts.append('</div></div>')
+    parts.append(
+        '<script>function filt(){var q=document.getElementById("q").value.toLowerCase();'
+        'var n=0;document.querySelectorAll(".trow").forEach(function(e){'
+        'var m=e.dataset.s.indexOf(q)>=0;e.style.display=m?"":"none";if(m)n++;});'
+        'document.getElementById("cnt").textContent=n+" samples";}</script>'
+    )
+    return "".join(parts)
+
+
+def _sample_detail_body(sample_id: int) -> str:
+    """Sample detail: all fields + the trays currently using this sample."""
+    sample = db.get_sample(sample_id)
+    if not sample:
+        return ('<div class="topbar"><h1>Sample</h1></div><div class="wrap">'
+                '<div class="card"><div class="soon">Not found.</div></div></div>')
+    rows = _sample_detail_rows(sample)
+    parts = [
+        '<div class="topbar">'
+        f'<h1>🧪 {sample["name"]}</h1>'
+        '<a href="/m/samples" style="color:#9CA3AF;text-decoration:none;font-size:.9rem">‹ Back</a>'
+        '</div><div class="wrap">'
+        '<div class="card"><div class="card-title">Sample details</div>'
+    ]
+    if rows:
+        for label, value in rows:
+            parts.append(f'<div class="info-row"><span>{label}</span>'
+                         f'<span class="info-val">{value}</span></div>')
+    else:
+        parts.append('<div class="meta" style="color:#6B7280">No data imported yet.</div>')
+    notes = (sample.get("notes") or "").strip()
+    if notes:
+        parts.append(f'<div class="sub" style="margin-top:8px">“{notes}”</div>')
+    parts.append('</div>')
+
+    trays = db.get_trays(sample_id=sample_id, status=db.IN_INCUBATOR_STATUSES)
+    parts.append(f'<div class="ml" style="margin:16px 4px 8px">Trays using this sample ({len(trays)})</div>')
+    if trays:
+        for t in trays:
+            parts.append(
+                f'<a class="trow" href="/tray/{t["id"]}">'
+                f'<div><div class="tn">{t.get("tray_number")}</div>'
+                f'<div class="ts">{t.get("incubator_name") or "—"}</div></div>'
+                f'<div class="tg" style="color:#9CA3AF">{db.tray_status_label(t.get("status"))}</div></a>'
+            )
+    else:
+        parts.append('<div class="card"><div class="soon">No trays currently use this sample.</div></div>')
+    parts.append('</div>')
+    return "".join(parts)
 
 
 def _trays_home_body(notfound: str = None) -> str:
@@ -1838,6 +1932,14 @@ def _make_flask_app():
     def mobile_scan():
         nxt = (request.args.get("next") or "").strip()
         return _mobile_page("Scan Tray", _scan_body(nxt), active="trays")
+
+    @app.route("/m/samples")
+    def mobile_samples():
+        return _mobile_page("Samples", _samples_list_body(), active="samples")
+
+    @app.route("/m/sample/<int:sample_id>")
+    def mobile_sample_detail(sample_id):
+        return _mobile_page("Sample", _sample_detail_body(sample_id), active="samples")
 
     @app.route("/m/tray-lookup")
     def mobile_tray_lookup():
