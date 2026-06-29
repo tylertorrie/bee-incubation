@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.11.6"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.11.7"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -1115,6 +1115,10 @@ class IncubationApp(ctk.CTk):
         for w in container.winfo_children():
             w.destroy()
 
+        # Incubators with an active alert → their cards get a red outline
+        self._alert_inc_ids = {a["incubator_id"] for a in db.get_active_alerts()
+                               if a.get("incubator_id")}
+
         show_hidden = getattr(self, "_dash_show_hidden", None)
         show_hidden = show_hidden.get() if show_hidden else False
         all_inc     = db.get_incubators(include_hidden=True)
@@ -1207,8 +1211,14 @@ class IncubationApp(ctk.CTk):
         title_col = SUBTEXT  if is_hidden else GOLD
         bdr_col   = "#222D3D" if is_hidden else BORDER
 
+        # Red outline when this incubator has an active alert
+        has_alert  = inc["id"] in getattr(self, "_alert_inc_ids", set())
+        bdr_width  = 2 if has_alert else 1
+        if has_alert:
+            bdr_col = RED
+
         card = ctk.CTkFrame(parent, fg_color=card_bg, corner_radius=12,
-                            border_width=1, border_color=bdr_col)
+                            border_width=bdr_width, border_color=bdr_col)
 
         # ── Readings ──
         reading = self._govee.get_last(inc["id"])
@@ -1292,7 +1302,8 @@ class IncubationApp(ctk.CTk):
         lbl_ts = _label(left, f"Last polled: {_poll_txt}", FONT_S, _poll_col)
         lbl_ts.pack(anchor="w")
         self._card_widgets[inc["id"]] = {"temp": lbl_temp, "hum": lbl_hum,
-                                          "dot": lbl_dot, "ts": lbl_ts, "inc": inc}
+                                          "dot": lbl_dot, "ts": lbl_ts, "inc": inc,
+                                          "card": card, "hidden": is_hidden}
         batches = db.get_batches(incubator_id=inc["id"], status="active")
         events  = calc.get_all_events(batches, lookahead_days=14)
         if events:
@@ -3591,7 +3602,18 @@ class IncubationApp(ctk.CTk):
     def _update_dashboard_readings(self):
         """Update only the sensor labels on each card — no rebuild, no shutter."""
         unit = db.get_setting("temp_unit", "C")
+        alert_ids = {a["incubator_id"] for a in db.get_active_alerts()
+                     if a.get("incubator_id")}
+        self._alert_inc_ids = alert_ids
         for inc_id, widgets in self._card_widgets.items():
+            # Red outline live when an alert is active for this incubator
+            card = widgets.get("card")
+            if card is not None:
+                if inc_id in alert_ids:
+                    card.configure(border_width=2, border_color=RED)
+                else:
+                    card.configure(border_width=1,
+                                   border_color="#222D3D" if widgets.get("hidden") else BORDER)
             reading = self._govee.get_last(inc_id)
             if not reading:
                 db_row  = db.get_latest_reading(inc_id)
