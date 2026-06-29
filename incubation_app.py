@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.11.5"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.11.6"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -1083,7 +1083,12 @@ class IncubationApp(ctk.CTk):
         for inc in incs:
             row = ctk.CTkFrame(panel, fg_color=CARD2, corner_radius=8)
             row.pack(fill="x", pady=4, padx=2)
-            _label(row, inc["name"], FONT_B, GOLD).pack(anchor="w", padx=10, pady=(8, 2))
+            # Name (left) + Edit button (right) on one line
+            head = ctk.CTkFrame(row, fg_color="transparent")
+            head.pack(fill="x", padx=10, pady=(8, 2))
+            _label(head, inc["name"], FONT_B, GOLD).pack(side="left")
+            _btn(head, "✎ Edit", lambda i=inc: self._open_incubator_dialog(i),
+                 width=70, height=24, fg=BORDER, hover=CARD).pack(side="right")
             mode_key = inc.get("temp_mode", "incubation")
             cfg = calc.TEMP_MODES.get(mode_key, calc.TEMP_MODES["incubation"])
             var = ctk.StringVar(value=cfg["label"])
