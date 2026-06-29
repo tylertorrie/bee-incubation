@@ -325,6 +325,9 @@ class GoveeClient:
                 for inc in incubators_fn():
                     if not self._running:
                         break
+                    # Skip incubators turned off — don't collect their data
+                    if (inc.get("temp_mode") or "incubation") == "off":
+                        continue
                     temp_c, humidity = self.poll_incubator(inc)
                     if temp_c is not None and humidity is not None:
                         self.connected = True

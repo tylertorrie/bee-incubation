@@ -198,6 +198,10 @@ def main():
             incubators = db.get_incubators(include_hidden=True)
             log.info(f"Poll cycle — {len(incubators)} incubator(s) (including hidden)")
             for inc in incubators:
+                # Skip incubators that are turned off — no need to collect their data
+                if (inc.get("temp_mode") or "incubation") == "off":
+                    log.info(f"  {inc['name']}: mode is OFF — skipping data collection")
+                    continue
                 device_id = (inc.get("govee_device_id") or "").strip()
                 sku       = (inc.get("govee_sku") or "").strip()
                 if not device_id:
