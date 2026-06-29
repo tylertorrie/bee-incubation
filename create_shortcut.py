@@ -97,7 +97,11 @@ def make_icon() -> str | None:
         print("  [icon] Pillow not installed — skipping icon.")
         return None
 
-    if LOGO_PNG.exists():
+    app_icon = APP_DIR / "app_icon.png"
+    if app_icon.exists():
+        print(f"  [icon] Using {app_icon.name}")
+        base = Image.open(app_icon).convert("RGBA").resize((256, 256), Image.LANCZOS)
+    elif LOGO_PNG.exists():
         print(f"  [icon] Using {LOGO_PNG.name}")
         base = _make_transparent(Image.open(LOGO_PNG))
         base = base.resize((256, 256), Image.LANCZOS)

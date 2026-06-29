@@ -16,10 +16,12 @@ __pycache__/
 *.log
 
 # Desktop shortcut / icon artefacts
-# (logo.png is tracked — it's the source asset)
+# (logo.png and app_icon.png are tracked — they're the source assets)
 *.ico
 *.lnk
 *.ps1
+# Raw icon drop (superseded by app_icon.png)
+Bee-JPG (3).jpg
 
 # VS Code / editor folders
 .vscode/
