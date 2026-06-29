@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.10.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.10.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:

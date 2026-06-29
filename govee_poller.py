@@ -206,8 +206,7 @@ def main():
                 log.info(f"  {inc['name']}: polling device={device_id} sku={sku}")
                 temp_c, humidity = client.poll_incubator(inc)
                 if temp_c is not None and humidity is not None:
-                    if temp_c > 50:  # Govee API returns °F — convert to °C for storage
-                        temp_c = round((temp_c - 32) * 5 / 9, 2)
+                    temp_c = govee_mod.to_celsius(temp_c)  # convert by unit, not value
                     db.save_reading(inc["id"], temp_c, humidity)
                     log.info(f"  {inc['name']}: {temp_c:.2f}°C  {humidity:.1f}%")
                 else:

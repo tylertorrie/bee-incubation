@@ -50,6 +50,25 @@ def _raw_to_value(raw) -> float | None:
     return raw / 100.0 if raw > 100 else float(raw)
 
 
+def to_celsius(sensor_temp) -> float | None:
+    """Convert a sensor temperature reading to °C for storage.
+
+    The Govee sensors report in the unit set in 'govee_sensor_unit' (default
+    'F'). We convert based on that unit — NOT on the value — so cold incubators
+    near 50°F don't flip between converted/unconverted (which caused a sawtooth).
+    """
+    if sensor_temp is None:
+        return None
+    try:
+        import incubation_db as _db
+        unit = (_db.get_setting("govee_sensor_unit", "F") or "F").upper()
+    except Exception:
+        unit = "F"
+    if unit.startswith("F"):
+        return round((sensor_temp - 32) * 5 / 9, 2)
+    return round(float(sensor_temp), 2)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 
 class GoveeClient:
@@ -309,8 +328,7 @@ class GoveeClient:
                     temp_c, humidity = self.poll_incubator(inc)
                     if temp_c is not None and humidity is not None:
                         self.connected = True
-                        if temp_c > 50:  # sensor reports °F — convert to °C
-                            temp_c = round((temp_c - 32) * 5 / 9, 2)
+                        temp_c = to_celsius(temp_c)  # convert by unit, not value
                         self._last[inc["id"]] = {
                             "temp_c":    temp_c,
                             "humidity":  humidity,
