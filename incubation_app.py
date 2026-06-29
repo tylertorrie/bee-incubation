@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.10.2"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.11.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -1041,9 +1041,21 @@ class IncubationApp(ctk.CTk):
             command=self._toggle_dash_hidden)
         # packed conditionally in _refresh_dashboard
 
+        # Body: card area (left) + incubator mode panel (right)
+        body = ctk.CTkFrame(frame, fg_color="transparent")
+        body.pack(fill="both", expand=True)
+
         self._dash_scroll = ctk.CTkScrollableFrame(
-            frame, fg_color="transparent", corner_radius=0)
-        self._dash_scroll.pack(fill="both", expand=True, padx=12, pady=4)
+            body, fg_color="transparent", corner_radius=0)
+        self._dash_scroll.pack(side="left", fill="both", expand=True, padx=(12, 6), pady=4)
+
+        mode_col = ctk.CTkFrame(body, fg_color=CARD, width=360, corner_radius=10)
+        mode_col.pack(side="right", fill="y", padx=(0, 12), pady=4)
+        mode_col.pack_propagate(False)
+        _label(mode_col, "Incubator Modes", FONT_H, GOLD).pack(
+            anchor="w", padx=14, pady=(12, 6))
+        self._dash_mode_panel = ctk.CTkScrollableFrame(mode_col, fg_color="transparent")
+        self._dash_mode_panel.pack(fill="both", expand=True, padx=6, pady=(0, 8))
 
         frame._card_container = self._dash_scroll
         return frame
@@ -1052,7 +1064,43 @@ class IncubationApp(ctk.CTk):
         self._dash_show_hidden.set(not self._dash_show_hidden.get())
         self._refresh_dashboard()
 
+    def _refresh_mode_panel(self):
+        """Right-hand dashboard panel: each incubator with a temp-mode selector."""
+        panel = getattr(self, "_dash_mode_panel", None)
+        if panel is None:
+            return
+        for w in panel.winfo_children():
+            w.destroy()
+        mode_labels = [v["label"] for v in calc.TEMP_MODES.values()]
+        incs = db.get_incubators(include_hidden=True)
+        if not incs:
+            _label(panel, "No incubators yet.", FONT_S, SUBTEXT).pack(pady=10)
+            return
+        for inc in incs:
+            row = ctk.CTkFrame(panel, fg_color=CARD2, corner_radius=8)
+            row.pack(fill="x", pady=4, padx=2)
+            _label(row, inc["name"], FONT_B, GOLD).pack(anchor="w", padx=10, pady=(8, 2))
+            mode_key = inc.get("temp_mode", "incubation")
+            cfg = calc.TEMP_MODES.get(mode_key, calc.TEMP_MODES["incubation"])
+            var = ctk.StringVar(value=cfg["label"])
+            seg = ctk.CTkSegmentedButton(
+                row, values=mode_labels, variable=var, height=30, font=FONT_S,
+                command=lambda label, i=inc["id"]: self._on_dash_mode(label, i))
+            seg.pack(fill="x", padx=10, pady=(0, 10))
+
+    def _on_dash_mode(self, label: str, inc_id: int):
+        key  = calc._MODE_BY_LABEL.get(label, "incubation")
+        prev = next((x for x in db.get_incubators(include_hidden=True)
+                     if x["id"] == inc_id), {}).get("temp_mode", "incubation")
+        if key == prev:
+            return
+        db.set_incubator_temp_mode(inc_id, key)
+        self._sync_trays_to_mode(inc_id, key, prev)   # cool-down prompt if relevant
+        self.after(50, self._refresh_dashboard)        # deferred so the widget isn't
+                                                       # destroyed mid-callback
+
     def _refresh_dashboard(self):
+        self._refresh_mode_panel()
         self._card_widgets.clear()
         container = self._dash_scroll
         for w in container.winfo_children():
@@ -1133,8 +1181,8 @@ class IncubationApp(ctk.CTk):
             if grid._resize_job:
                 self.after_cancel(grid._resize_job)
             def _do():
-                w    = self.winfo_width()
-                cols = 4 if w >= 1400 else (3 if w >= 1000 else 2)
+                w    = self.winfo_width() - 380   # leave room for the mode panel
+                cols = 4 if w >= 1400 else (3 if w >= 1000 else (2 if w >= 640 else 1))
                 if getattr(grid, "_last_cols", None) != cols:
                     grid._last_cols = cols
                     _build_grid(cols)
