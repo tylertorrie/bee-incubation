@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.11.3"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.11.4"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -893,10 +893,12 @@ class IncubationApp(ctk.CTk):
         # QR server port
         self._qr_port = int(db.get_setting("qr_server_port", "5151"))
 
-        # Build UI
+        # Build UI — order matters for pack(): the sidebar (left) and the status
+        # bar (bottom, full width) must be reserved BEFORE the expanding main
+        # area, or _main won't claim the full remaining width (left a right gap).
         self._build_sidebar()
-        self._build_main()
         self._build_status_bar()
+        self._build_main()
 
         # Build all views (hidden until selected)
         self._views = {}
