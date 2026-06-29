@@ -566,6 +566,46 @@ def _incubator_detail_body(inc_id: int, hours: int) -> str:
                       + _pill_html("PM", "🌙", pm, href=f"/m/inspect/{inc_id}")
                       + '</div>')
 
+    # Mode selector — four buttons, active one highlighted gold
+    current_mode = inc.get("temp_mode") or "incubation"
+    mode_defs = [
+        ("off",          "Off"),
+        ("cool_storage", "Cool Storage"),
+        ("holding",      "Holding Temp"),
+        ("incubation",   "Incubation"),
+    ]
+    mode_btns = "".join(
+        f'<button onclick="setMode(\'{key}\')" '
+        f'style="flex:1;padding:8px 2px;border:none;border-radius:8px;cursor:pointer;'
+        f'font-weight:700;font-size:.78rem;'
+        f'background:{"#D97706" if key==current_mode else "#263347"};'
+        f'color:{"#111" if key==current_mode else "#9CA3AF"}">'
+        f'{label}</button>'
+        for key, label in mode_defs
+    )
+    active_trays   = db.count_active_trays(inc_id)
+    cooled_trays   = db.count_cooled_trays(inc_id)
+    mode_js = f"""
+<script>
+function setMode(key) {{
+  if (key === '{current_mode}') return;
+  var msg = null;
+  if (key === 'holding' && {active_trays} > 0)
+    msg = 'Move {active_trays} tray(s) from Incubation to Cooled and start their cool-down timer?';
+  if (key === 'incubation' && {cooled_trays} > 0)
+    msg = 'Move {cooled_trays} cooled tray(s) back to Incubation? (Their cool-down timer will reset.)';
+  var syncTrays = msg ? confirm(msg) : false;
+  fetch('/m/api/incubator/{inc_id}/mode', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{mode: key, sync_trays: syncTrays}})
+  }}).then(function(r) {{ return r.json(); }}).then(function(d) {{
+    if (d.ok) location.reload();
+    else alert('Error: ' + (d.error || 'unknown'));
+  }});
+}}
+</script>"""
+
     return (
         '<div class="topbar">'
         f'<h1>{inc["name"]}</h1>'
@@ -584,6 +624,10 @@ def _incubator_detail_body(inc_id: int, hours: int) -> str:
         + pills_html +
         '</div>'
         '<div class="card">'
+        '<div class="ml" style="margin-bottom:8px">Mode</div>'
+        f'<div style="display:flex;gap:6px">{mode_btns}</div>'
+        '</div>'
+        '<div class="card">'
         f'<div style="display:flex;gap:8px;margin-bottom:10px">{rbtns}</div>'
         f'{chart}'
         '<div style="display:flex;justify-content:space-between;margin-top:6px">'
@@ -598,6 +642,7 @@ def _incubator_detail_body(inc_id: int, hours: int) -> str:
         f'<a class="ibtn" style="background:#1D4ED8" href="/m/inspect/{inc_id}">'
         '+ Record inspection</a>'
         '</div>'
+        + mode_js
     )
 
 
@@ -1788,6 +1833,31 @@ def _make_flask_app():
         return _mobile_page("Incubator",
                             _incubator_detail_body(inc_id, hours),
                             active="home")
+
+    @app.route("/m/api/incubator/<int:inc_id>/mode", methods=["POST"])
+    def mobile_set_incubator_mode(inc_id):
+        try:
+            import incubation_calc as calc
+        except Exception:
+            calc = None
+        data = request.get_json(silent=True) or {}
+        mode = (data.get("mode") or "").strip()
+        valid = {"off", "cool_storage", "holding", "incubation"}
+        if mode not in valid:
+            return jsonify({"ok": False, "error": "Invalid mode"}), 400
+        inc = next((i for i in db.get_incubators(include_hidden=True)
+                    if i["id"] == inc_id), None)
+        if not inc:
+            return jsonify({"ok": False, "error": "Not found"}), 404
+        prev = inc.get("temp_mode") or "incubation"
+        db.set_incubator_temp_mode(inc_id, mode)
+        moved = 0
+        if data.get("sync_trays"):
+            if mode == "holding":
+                moved = db.cool_trays(inc_id)
+            elif mode == "incubation":
+                moved = db.uncool_trays(inc_id)
+        return jsonify({"ok": True, "mode": mode, "trays_moved": moved})
 
     @app.route("/m/inspections")
     def mobile_inspections():
