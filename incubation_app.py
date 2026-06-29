@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.11.7"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.11.8"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -1154,7 +1154,9 @@ class IncubationApp(ctk.CTk):
         _stats         = db.get_tray_stats(status=db.IN_INCUBATOR_STATUSES)
         tray_count     = _stats["count"]
         total_gals     = _stats["total_gals"]
-        total_capacity = sum((i.get("capacity") or 0) for i in incubators)
+        # Total capacity = every incubator (even off/hidden), so the denominator
+        # stays constant regardless of which incubators are turned on.
+        total_capacity = sum((i.get("capacity") or 0) for i in all_inc)
         fill_pct       = round(tray_count / total_capacity * 100) if total_capacity else 0
         fill_col       = GREEN if fill_pct < 80 else (ORANGE if fill_pct < 95 else RED)
 
