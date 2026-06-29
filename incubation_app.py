@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.11.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.11.2"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -1048,8 +1048,8 @@ class IncubationApp(ctk.CTk):
         body.columnconfigure(1, weight=0)   # mode panel fixed width
         body.rowconfigure(0, weight=1)
 
-        self._dash_scroll = ctk.CTkScrollableFrame(
-            body, fg_color="transparent", corner_radius=0)
+        # Plain frame (not scrollable) so the card grid stretches to fill width
+        self._dash_scroll = ctk.CTkFrame(body, fg_color="transparent")
         self._dash_scroll.grid(row=0, column=0, sticky="nsew", padx=(12, 6), pady=4)
 
         mode_col = ctk.CTkFrame(body, fg_color=CARD, width=340, corner_radius=10)
@@ -1184,8 +1184,9 @@ class IncubationApp(ctk.CTk):
             if grid._resize_job:
                 self.after_cancel(grid._resize_job)
             def _do():
-                w    = self.winfo_width() - 380   # leave room for the mode panel
-                cols = 4 if w >= 1400 else (3 if w >= 1000 else (2 if w >= 640 else 1))
+                # available card width = window − nav sidebar (190) − mode panel (~360)
+                w    = self.winfo_width() - 560
+                cols = 4 if w >= 1400 else (3 if w >= 1000 else (2 if w >= 600 else 1))
                 if getattr(grid, "_last_cols", None) != cols:
                     grid._last_cols = cols
                     _build_grid(cols)
