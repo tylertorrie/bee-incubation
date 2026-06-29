@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.12.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.12.2"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -1614,7 +1614,7 @@ class IncubationApp(ctk.CTk):
         self._cooldown_lbl = _label(fbar, "", FONT_S, TEAL)
         self._cooldown_lbl.pack(side="right", padx=12, pady=6)
 
-        cols = ("Tray #", "Sample", "Incubator", "Batch",
+        cols = ("Tray #", "Sample", "Live Bees/Lb", "Incubator", "Batch",
                 "Weight (lbs)", "Volume (gal)", "Live Count",
                 "Parasite %", "In Date", "Out Date", "Cool Days", "Status")
         self._tray_tree = self._make_tree(frame, cols)
@@ -1638,7 +1638,7 @@ class IncubationApp(ctk.CTk):
             self._tray_sort_asc = True
 
         # Update heading arrows
-        cols = ("Tray #", "Sample", "Incubator", "Batch",
+        cols = ("Tray #", "Sample", "Live Bees/Lb", "Incubator", "Batch",
                 "Weight (lbs)", "Volume (gal)", "Live Count",
                 "Parasite %", "In Date", "Out Date", "Cool Days", "Status")
         for ci, col in enumerate(cols):
@@ -1665,7 +1665,7 @@ class IncubationApp(ctk.CTk):
         # Reset sort state on refresh
         self._tray_sort_col = None
         self._tray_sort_asc = True
-        cols = ("Tray #", "Sample", "Incubator", "Batch",
+        cols = ("Tray #", "Sample", "Live Bees/Lb", "Incubator", "Batch",
                 "Weight (lbs)", "Volume (gal)", "Live Count",
                 "Parasite %", "In Date", "Out Date", "Cool Days", "Status")
         for col in cols:
@@ -1682,6 +1682,7 @@ class IncubationApp(ctk.CTk):
             (str(t["id"]), (
                 t["tray_number"],
                 t.get("sample_name") or "—",
+                f"{t['sample_live_per_lb']:,.0f}" if t.get("sample_live_per_lb") else "—",
                 t.get("incubator_name") or "—",
                 t.get("batch_name") or "—",
                 f"{t['weight_lbs']:.2f}" if t.get("weight_lbs") else "—",

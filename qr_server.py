@@ -1603,14 +1603,17 @@ def _incubator_trays_body(inc_id: int) -> str:
     ]
     if trays:
         for t in trays:
-            tn  = t.get("tray_number") or "—"
-            sm  = t.get("sample_name") or "—"
-            vol = t.get("volume_gal")
+            tn   = t.get("tray_number") or "—"
+            sm   = t.get("sample_name") or "—"
+            lplb = t.get("sample_live_per_lb")
+            vol  = t.get("volume_gal")
             vtxt = f"{vol:.1f} gal" if vol is not None else "—"
-            key = (str(tn) + " " + str(sm)).lower().replace('"', "")
+            lplb_txt = f"{lplb:,.0f}/lb" if lplb is not None else ""
+            sub  = sm + (f" · {lplb_txt}" if lplb_txt else "")
+            key  = (str(tn) + " " + str(sm)).lower().replace('"', "")
             parts.append(
                 f'<a class="trow" href="/tray/{t["id"]}" data-s="{key}">'
-                f'<div><div class="tn">{tn}</div><div class="ts">{sm}</div></div>'
+                f'<div><div class="tn">{tn}</div><div class="ts">{sub}</div></div>'
                 f'<div class="tg">{vtxt}</div></a>'
             )
     else:
