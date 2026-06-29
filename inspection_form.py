@@ -312,6 +312,7 @@ class InspectionDialog(ctk.CTkToplevel):
                      f"(Δ {temp_diff:.1f}°C)"),
                     severity="warning",
                     incubator_id=self._inc["id"],
+                    dedup_key=f"inspection_temp:{self._inc['id']}",
                 )
             except Exception:
                 pass

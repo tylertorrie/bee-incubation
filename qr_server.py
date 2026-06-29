@@ -874,6 +874,7 @@ def _save_mobile_inspection(inc_id: int, form) -> Optional[str]:
                  f"Thermometer {thermo_c:.1f}°C vs Govee {govee_temp:.1f}°C "
                  f"(Δ {temp_diff:.1f}°C)"),
                 severity="warning", incubator_id=inc_id,
+                dedup_key=f"inspection_temp:{inc_id}",
             )
         except Exception:
             pass
@@ -1311,6 +1312,7 @@ def _update_mobile_inspection(insp_id: int, form) -> Optional[int]:
                  f"Thermometer {thermo_c:.1f}°C vs Govee {govee_temp:.1f}°C "
                  f"(Δ {temp_diff:.1f}°C)"),
                 severity="warning", incubator_id=inc_id,
+                dedup_key=f"inspection_temp:{inc_id}",
             )
         except Exception:
             pass

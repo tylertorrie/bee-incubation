@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.10.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.10.2"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -3594,6 +3594,8 @@ class IncubationApp(ctk.CTk):
         batches   = db.get_batches(status="active")
         for batch in batches:
             for ev in calc.get_upcoming_events(batch, lookahead_days=lookahead):
+                # One alert per event per batch, regardless of the countdown text
+                _evkey = f"date:{ev.get('batch_id')}:{ev['label']}"
                 if ev["urgent"]:
                     db.add_alert(
                         "date",
@@ -3601,6 +3603,7 @@ class IncubationApp(ctk.CTk):
                         f"{ev['label']} — {ev['batch_name']} ({ev['incubator_name']})",
                         severity="critical",
                         batch_id=ev.get("batch_id"),
+                        dedup_key=_evkey,
                     )
                 elif ev["days_away"] <= lookahead:
                     db.add_alert(
@@ -3609,6 +3612,7 @@ class IncubationApp(ctk.CTk):
                         f"{ev['batch_name']} ({ev['incubator_name']})",
                         severity="warning",
                         batch_id=ev.get("batch_id"),
+                        dedup_key=_evkey,
                     )
         self.after(0, self._refresh_alert_badge)
 
