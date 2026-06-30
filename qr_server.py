@@ -203,16 +203,20 @@ def _sample_detail_rows(sample) -> list:
         return []
     def num(v, dec=0):
         return f"{v:,.{dec}f}" if isinstance(v, (int, float)) else None
+    def kg(lbs_val, kg_val, dec=1):
+        if isinstance(kg_val, (int, float)):
+            return f"{kg_val:,.{dec}f}"
+        if isinstance(lbs_val, (int, float)):
+            return f"{lbs_val * 0.45359237:,.{dec}f}"
+        return None
     candidates = [
         ("Live bees / lb",   num(sample.get("live_bees_per_lb"))),
         ("Live bees / kg",   num(sample.get("live_bees_per_kg"))),
-        ("Total lbs",        num(sample.get("total_weight_lbs"), 1)),
-        ("Total kg",         num(sample.get("total_weight_kg"), 1)),
+        ("Total kg",         kg(sample.get("total_weight_lbs"), sample.get("total_weight_kg"), 1)),
         ("Total gal bees",   num(sample.get("total_volume_gal"), 1)),
         ("Parasites",        num(sample.get("parasites"), 1)),
         ("Chalkbrood",       num(sample.get("chalkbrood"), 1)),
-        ("Lbs for 2 gal",    num(sample.get("lbs_per_2gal"), 2)),
-        ("KG for 2 gal",     num(sample.get("kg_per_2gal"), 2)),
+        ("KG for 2 gal",     kg(sample.get("lbs_per_2gal"), sample.get("kg_per_2gal"), 2)),
         ("Total trays",      num(sample.get("total_trays"))),
         ("Incubator space",  (sample.get("incubator_space") or None)),
     ]

@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.12.3"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.12.4"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -1522,8 +1522,8 @@ class IncubationApp(ctk.CTk):
         _btn(hdr, "+ Add Sample", lambda: self._open_sample_dialog(),
              fg=CARD, hover=CARD2, width=130).pack(side="right", padx=6)
 
-        cols = ("Name", "Total Lbs", "Live Bees/Lb", "Parasites", "Chalkbrood",
-                "Total Gal", "Lbs for 2gal", "Total Trays", "Inc. Space", "Notes")
+        cols = ("Name", "Total Kg", "Live Bees/Lb", "Parasites", "Chalkbrood",
+                "Total Gal", "Kg for 2gal", "Total Trays", "Inc. Space", "Notes")
         self._smp_tree = self._make_tree(frame, cols)
         self._smp_tree.pack(fill="both", expand=True, padx=12, pady=4)
         self._smp_tree.bind("<Double-1>", self._on_sample_double_click)
@@ -1536,15 +1536,22 @@ class IncubationApp(ctk.CTk):
         def _n(v, dec=1):
             return f"{v:,.{dec}f}" if isinstance(v, (int, float)) else "—"
 
+        def _kg(lbs_val, kg_val, dec=1):
+            if isinstance(kg_val, (int, float)):
+                return f"{kg_val:,.{dec}f}"
+            if isinstance(lbs_val, (int, float)):
+                return f"{lbs_val * 0.45359237:,.{dec}f}"
+            return "—"
+
         for s in db.get_samples():
             tree.insert("", "end", iid=str(s["id"]), values=(
                 s["name"],
-                _n(s.get("total_weight_lbs")),
+                _kg(s.get("total_weight_lbs"), s.get("total_weight_kg")),
                 _n(s.get("live_bees_per_lb"), 0),
                 _n(s.get("parasites")),
                 _n(s.get("chalkbrood")),
                 _n(s.get("total_volume_gal")),
-                _n(s.get("lbs_per_2gal"), 2),
+                _kg(s.get("lbs_per_2gal"), s.get("kg_per_2gal"), 2),
                 _n(s.get("total_trays"), 0),
                 s.get("incubator_space") or "—",
                 s.get("notes") or "",
