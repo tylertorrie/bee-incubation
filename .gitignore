@@ -30,3 +30,6 @@ Bee-JPG (3).jpg
 # OS files
 Thumbs.db
 .DS_Store
+
+# Google Calendar OAuth token (local secret)
+gcal_token.json

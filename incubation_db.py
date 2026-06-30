@@ -121,6 +121,8 @@ def init_db():
                 capacity        INTEGER DEFAULT 50,
                 govee_device_id TEXT    DEFAULT '',
                 govee_sku       TEXT    DEFAULT '',
+                sensibo_device_id TEXT  DEFAULT '',
+                incubation_start TEXT   DEFAULT '',
                 temp_mode            TEXT    DEFAULT 'incubation',
                 temp_alerts_enabled  INTEGER DEFAULT 1,
                 humidity_min         REAL    DEFAULT 55.0,
@@ -204,6 +206,10 @@ def init_db():
         """)
         defaults = [
             ("govee_api_key",           ""),
+            ("sensibo_api_key",         ""),
+            ("gcal_credentials_path",   ""),
+            ("gcal_calendar_id",        "primary"),
+            ("gcal_enabled",            "0"),
             ("lbs_per_gal",             "2.2"),
             ("target_gals_per_tray",    "2.0"),
             ("qr_server_port",          "5151"),
@@ -227,6 +233,12 @@ def init_db():
         conn.execute("UPDATE temp_humidity_readings SET is_downsampled=0 WHERE is_downsampled IS NULL")
         # Key used to suppress repeated/duplicate alerts
         _safe_add_column(conn, "alerts", "dedup_key", "TEXT")
+        # Per-incubator Sensibo AC device link (manual on/off/temp control)
+        _safe_add_column(conn, "incubators", "sensibo_device_id", "TEXT DEFAULT ''")
+        # Explicit incubation start date for the Timeline day-grid (overrides
+        # the date auto-derived from the incubator's active trays)
+        _safe_add_column(conn, "incubators", "incubation_start", "TEXT DEFAULT ''")
+
         # Sample fields matching the field spreadsheet (live bees/lb, etc.)
         for _col, _typ in [
             ("total_weight_kg", "REAL"), ("live_bees_per_lb", "REAL"),
@@ -308,6 +320,14 @@ def set_setting(key: str, value: str):
 
 # ── Incubators ────────────────────────────────────────────────────────────────
 
+def set_incubator_incubation_start(incubator_id: int, start_iso: str):
+    """Set just the incubation start date (used by the Calendar's Schedule
+    button). Non-destructive — doesn't touch other incubator fields."""
+    with get_conn() as conn:
+        conn.execute("UPDATE incubators SET incubation_start=? WHERE id=?",
+                     (start_iso, incubator_id))
+
+
 def get_incubators(include_hidden: bool = False) -> list:
     """Return incubators ordered by sort_order then name.
     Hidden incubators are excluded by default; pass include_hidden=True
@@ -325,9 +345,9 @@ def get_incubators(include_hidden: bool = False) -> list:
 
 
 def upsert_incubator(data: dict) -> int:
-    cols = ["name", "capacity", "govee_device_id", "govee_sku",
-            "temp_mode", "temp_alerts_enabled", "humidity_min", "humidity_max",
-            "sort_order", "is_hidden"]
+    cols = ["name", "capacity", "govee_device_id", "govee_sku", "sensibo_device_id",
+            "incubation_start", "temp_mode", "temp_alerts_enabled",
+            "humidity_min", "humidity_max", "sort_order", "is_hidden"]
     with get_conn() as conn:
         if data.get("id"):
             sets = ", ".join(f"{c}=?" for c in cols)
@@ -448,6 +468,19 @@ def upsert_sample(data: dict) -> int:
         return cur.lastrowid
 
 
+def find_sample_by_name(name: str) -> dict | None:
+    """Return an existing sample whose normalized name matches, or None.
+    Used to warn before creating a duplicate via the Add Sample dialog."""
+    target = _normalize_sample_name(name)
+    if not target:
+        return None
+    with get_conn() as conn:
+        for r in conn.execute("SELECT * FROM samples ORDER BY id").fetchall():
+            if _normalize_sample_name(r["name"]) == target:
+                return dict(r)
+    return None
+
+
 def upsert_sample_by_name(data: dict) -> int | None:
     """Match an existing sample by name (case-insensitive) and update only the
     provided fields; create a new sample if the name isn't found. Keeps tray
@@ -460,10 +493,15 @@ def upsert_sample_by_name(data: dict) -> int | None:
              "parasites", "chalkbrood", "kg_per_2gal", "lbs_per_2gal",
              "total_trays", "incubator_space", "notes", "import_date"}
     fields = [k for k in data if k in valid]
+    target = _normalize_sample_name(name)
     with get_conn() as conn:
-        # Use TRIM so trailing/leading spaces in existing names don't prevent a match
-        row = conn.execute(
-            "SELECT id FROM samples WHERE TRIM(name)=? COLLATE NOCASE", (name,)).fetchone()
+        # Match on the normalized name so spacing/punctuation differences
+        # (e.g. "NW 31-10-13" vs "NW-31-10-13") don't create duplicates.
+        row = None
+        for r in conn.execute("SELECT id, name FROM samples ORDER BY id").fetchall():
+            if _normalize_sample_name(r["name"]) == target:
+                row = r
+                break
         if row:
             sid = row["id"]
             if fields:
@@ -479,12 +517,24 @@ def upsert_sample_by_name(data: dict) -> int | None:
         return cur.lastrowid
 
 
+def _normalize_sample_name(name: str) -> str:
+    """Normalize a sample name for duplicate detection.
+
+    Collapses every run of non-alphanumeric characters (spaces, hyphens,
+    parentheses, etc.) to a single space and lowercases, so near-identical
+    names like 'Woodruff NW 31-10-13' and 'Woodruff NW-31-10-13' are treated
+    as the same sample.
+    """
+    import re
+    return re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).strip()
+
+
 def merge_duplicate_samples() -> int:
-    """Find samples whose names are identical (case-insensitive, trimmed) and
-    merge each group into one record.
+    """Find samples whose names match after normalization (punctuation and
+    spacing collapsed, case-insensitive) and merge each group into one record.
 
     The survivor is the record with the most non-NULL detail fields.
-    All trays, batches, and incubation_batches that reference a duplicate are
+    All trays and incubation_batches that reference a duplicate are
     re-pointed to the survivor, then the duplicates are deleted.
     Returns the number of duplicate records removed.
     """
@@ -500,7 +550,9 @@ def merge_duplicate_samples() -> int:
         # Group by normalised name
         groups: dict[str, list[int]] = {}
         for r in rows:
-            key = (r["name"] or "").strip().lower()
+            key = _normalize_sample_name(r["name"])
+            if not key:
+                continue
             groups.setdefault(key, []).append(r["id"])
 
         for ids in groups.values():
@@ -532,7 +584,7 @@ def merge_duplicate_samples() -> int:
             # Re-point all FK references to the survivor
             for dup in duplicates:
                 conn.execute("UPDATE trays SET sample_id=? WHERE sample_id=?", (survivor, dup))
-                conn.execute("UPDATE batches SET sample_id=? WHERE sample_id=?", (survivor, dup))
+                conn.execute("UPDATE incubation_batches SET sample_id=? WHERE sample_id=?", (survivor, dup))
                 conn.execute("DELETE FROM samples WHERE id=?", (dup,))
                 removed += 1
 
@@ -588,6 +640,31 @@ def delete_batch(batch_id: int):
 
 # ── Trays ─────────────────────────────────────────────────────────────────────
 
+def _parse_year(s) -> int | None:
+    """Best-effort extract a 4-digit year from a date string (ISO or M/D/Y)."""
+    if not s:
+        return None
+    m = re.search(r"(19|20)\d{2}", str(s))
+    return int(m.group(0)) if m else None
+
+
+def current_year_sample_ids(year: int = None) -> set:
+    """Sample ids that have at least one tray whose Start Date is in `year`
+    (defaults to the current calendar year). Used to scope the mobile sample
+    list to the current season."""
+    if year is None:
+        year = datetime.now().year
+    ids = set()
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT sample_id, in_date FROM trays "
+            "WHERE sample_id IS NOT NULL").fetchall()
+    for r in rows:
+        if _parse_year(r["in_date"]) == year:
+            ids.add(r["sample_id"])
+    return ids
+
+
 def get_trays(incubator_id: int = None, sample_id: int = None,
               batch_id: int = None, status: str = None) -> list:
     with get_conn() as conn:
@@ -595,6 +672,8 @@ def get_trays(incubator_id: int = None, sample_id: int = None,
                       s.name AS sample_name,
                       s.live_bees_per_lb AS sample_live_per_lb,
                       s.live_bees_per_kg AS sample_live_per_kg,
+                      s.kg_per_2gal AS sample_kg_per_2gal,
+                      s.parasites AS sample_parasites,
                       s.chalkbrood AS sample_chalkbrood,
                       i.name AS incubator_name,
                       b.name AS batch_name

@@ -615,6 +615,89 @@ function setMode(key) {{
 }}
 </script>"""
 
+    # AC control — only shown if a Sensibo device is configured for this incubator
+    sensibo_id = (inc.get("sensibo_device_id") or "").strip()
+    ac_card = ""
+    if sensibo_id:
+        import sensibo_client as sensibo_mod
+        _sb = sensibo_mod.SensiboClient(api_key=db.get_setting("sensibo_api_key"))
+        _ac_st = _sb.fetch_state(sensibo_id)
+        _ac_on = bool(_ac_st.get("on")) if _ac_st else False
+        _toggle_bg = "#1C3A1C" if _ac_on else "#3A1C1C"
+        _toggle_fg = "#4CAF50" if _ac_on else "#EF4444"
+        _toggle_tx = "● On" if _ac_on else "● Off"
+        _ac_temp = _ac_st.get("targetTemperature")
+        _temp_label = f"{_ac_temp}°F" if _ac_temp is not None else "Set Temp"
+        _fan_label = (_ac_st.get("fanLevel") or "Fan").capitalize()
+        ac_card = (
+            '<div class="card">'
+            '<div class="ml" style="margin-bottom:8px">AC (Sensibo)</div>'
+            '<div style="display:flex;gap:6px">'
+            f'<button onclick="sensiboToggle()" '
+            f'style="flex:1;padding:8px 2px;border:none;border-radius:18px;cursor:pointer;'
+            f'font-weight:700;font-size:.85rem;background:{_toggle_bg};color:{_toggle_fg}">{_toggle_tx}</button>'
+            f'<button onclick="sensiboSetTemp()" '
+            f'style="flex:1;padding:8px 2px;border:none;border-radius:8px;cursor:pointer;'
+            f'font-weight:700;font-size:.85rem;background:#263347;color:#9CA3AF">{_temp_label}</button>'
+            '</div>'
+            '<div class="ml" style="margin:10px 0 6px">Fan speed</div>'
+            '<div style="display:flex;gap:6px;flex-wrap:wrap">'
+            + "".join(
+                '<button onclick="sensiboFan(\'' + lvl + '\')" '
+                'style="flex:1;min-width:60px;padding:7px 2px;border:none;border-radius:8px;cursor:pointer;'
+                'font-weight:700;font-size:.78rem;'
+                + ('background:#263347;color:#FFD700' if lvl == (_ac_st.get("fanLevel") or "") else 'background:#263347;color:#9CA3AF')
+                + '">' + lvl.capitalize() + '</button>'
+                for lvl in sensibo_mod.FAN_LEVELS
+            ) +
+            '</div>'
+            f'<div class="meta" style="margin-top:8px">Target temp range: '
+            f'minimum {sensibo_mod.MIN_TEMP_F}°F · maximum {sensibo_mod.MAX_TEMP_F}°F</div>'
+            '<div id="sensiboStatus" class="meta" style="margin-top:4px"></div>'
+            '</div>'
+            f"""<script>
+var SENSIBO_MIN = {sensibo_mod.MIN_TEMP_F}, SENSIBO_MAX = {sensibo_mod.MAX_TEMP_F};
+var SENSIBO_ON = {str(bool(_ac_on)).lower()};
+function sensiboToggle() {{
+  var target = !SENSIBO_ON;
+  fetch('/m/api/incubator/{inc_id}/ac', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{on: target}})
+  }}).then(function(r) {{ return r.json(); }}).then(function(d) {{
+    if (d.ok) location.reload();
+    else document.getElementById('sensiboStatus').textContent = 'Error: ' + (d.error || 'unknown');
+  }});
+}}
+function sensiboSetTemp() {{
+  var t = prompt('Target temperature (°F)  [' + SENSIBO_MIN + '-' + SENSIBO_MAX + ']:');
+  if (!t) return;
+  var v = parseInt(t, 10);
+  if (isNaN(v)) {{ alert('Enter a number.'); return; }}
+  if (v < SENSIBO_MIN || v > SENSIBO_MAX) {{
+    alert('Temperature must be between ' + SENSIBO_MIN + '°F and ' + SENSIBO_MAX + '°F.');
+    return;
+  }}
+  fetch('/m/api/incubator/{inc_id}/ac', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{target_temp: v}})
+  }}).then(function(r) {{ return r.json(); }}).then(function(d) {{
+    document.getElementById('sensiboStatus').textContent = d.ok ? 'Target temp set to ' + v + '°F.' : 'Error: ' + (d.error || 'unknown');
+  }});
+}}
+function sensiboFan(level) {{
+  fetch('/m/api/incubator/{inc_id}/ac', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{fan_level: level}})
+  }}).then(function(r) {{ return r.json(); }}).then(function(d) {{
+    document.getElementById('sensiboStatus').textContent = d.ok ? 'Fan set to ' + level + '.' : 'Error: ' + (d.error || 'unknown');
+  }});
+}}
+</script>"""
+        )
+
     return (
         '<div class="topbar">'
         f'<h1>{inc["name"]}</h1>'
@@ -636,6 +719,7 @@ function setMode(key) {{
         '<div class="ml" style="margin-bottom:8px">Mode</div>'
         f'<div style="display:flex;gap:6px">{mode_btns}</div>'
         '</div>'
+        + ac_card +
         '<div class="card">'
         f'<div style="display:flex;gap:8px;margin-bottom:10px">{rbtns}</div>'
         f'{chart}'
@@ -1374,16 +1458,20 @@ def _update_mobile_inspection(insp_id: int, form) -> Optional[int]:
 
 
 def _samples_list_body() -> str:
-    """Samples tab: search/filter + one card per sample with key stats."""
+    """Samples tab: search/filter + one card per sample with key stats.
+    Only samples used by trays started in the current year are shown."""
+    from datetime import datetime as _dt
+    cur_year = _dt.now().year
     counts = db.get_tray_counts_by_sample()
-    samples = db.get_samples()
+    this_year_ids = db.current_year_sample_ids(cur_year)
+    samples = [s for s in db.get_samples() if s["id"] in this_year_ids]
     parts = [
         '<div class="topbar"><h1>🧪 Samples</h1></div><div class="wrap">'
         '<div class="fld" style="margin-bottom:12px">'
         '<input type="search" id="q" placeholder="Filter samples…" '
         'autocapitalize="off" autocorrect="off" spellcheck="false" '
         'autocomplete="off" oninput="filt()"></div>'
-        f'<div class="meta" id="cnt" style="margin:0 4px 10px">{len(samples)} samples</div>'
+        f'<div class="meta" id="cnt" style="margin:0 4px 10px">{len(samples)} samples ({cur_year})</div>'
         '<div id="list">'
     ]
     if samples:
@@ -1408,7 +1496,7 @@ def _samples_list_body() -> str:
         '<script>function filt(){var q=document.getElementById("q").value.toLowerCase();'
         'var n=0;document.querySelectorAll(".trow").forEach(function(e){'
         'var m=e.dataset.s.indexOf(q)>=0;e.style.display=m?"":"none";if(m)n++;});'
-        'document.getElementById("cnt").textContent=n+" samples";}</script>'
+        'document.getElementById("cnt").textContent=n+" samples (' + str(cur_year) + ')";}</script>'
     )
     return "".join(parts)
 
@@ -1438,18 +1526,22 @@ def _sample_detail_body(sample_id: int) -> str:
         parts.append(f'<div class="sub" style="margin-top:8px">“{notes}”</div>')
     parts.append('</div>')
 
-    trays = db.get_trays(sample_id=sample_id, status=db.IN_INCUBATOR_STATUSES)
+    trays = db.get_trays(sample_id=sample_id)
+    _LIMIT = 60
     parts.append(f'<div class="ml" style="margin:16px 4px 8px">Trays using this sample ({len(trays)})</div>')
     if trays:
-        for t in trays:
+        for t in trays[:_LIMIT]:
             parts.append(
                 f'<a class="trow" href="/tray/{t["id"]}">'
                 f'<div><div class="tn">{t.get("tray_number")}</div>'
                 f'<div class="ts">{t.get("incubator_name") or "—"}</div></div>'
                 f'<div class="tg" style="color:#9CA3AF">{db.tray_status_label(t.get("status"))}</div></a>'
             )
+        if len(trays) > _LIMIT:
+            parts.append(f'<div class="meta" style="margin:8px 4px">'
+                         f'… and {len(trays) - _LIMIT} more</div>')
     else:
-        parts.append('<div class="card"><div class="soon">No trays currently use this sample.</div></div>')
+        parts.append('<div class="card"><div class="soon">No trays use this sample.</div></div>')
     parts.append('</div>')
     return "".join(parts)
 
@@ -1875,6 +1967,42 @@ def _make_flask_app():
             elif mode == "incubation":
                 moved = db.uncool_trays(inc_id)
         return jsonify({"ok": True, "mode": mode, "trays_moved": moved})
+
+    @app.route("/m/api/incubator/<int:inc_id>/ac", methods=["POST"])
+    def mobile_set_incubator_ac(inc_id):
+        import sensibo_client as sensibo_mod
+        inc = next((i for i in db.get_incubators(include_hidden=True)
+                    if i["id"] == inc_id), None)
+        if not inc:
+            return jsonify({"ok": False, "error": "Not found"}), 404
+        device_id = (inc.get("sensibo_device_id") or "").strip()
+        if not device_id:
+            return jsonify({"ok": False, "error": "No Sensibo device configured"}), 400
+        api_key = db.get_setting("sensibo_api_key")
+        if not api_key:
+            return jsonify({"ok": False, "error": "No Sensibo API key configured"}), 400
+        data = request.get_json(silent=True) or {}
+        on = data.get("on")
+        target_temp = data.get("target_temp")
+        fan_level = data.get("fan_level")
+        if target_temp is not None:
+            try:
+                target_temp = int(target_temp)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "Invalid temperature"}), 400
+            if not (sensibo_mod.MIN_TEMP_F <= target_temp <= sensibo_mod.MAX_TEMP_F):
+                return jsonify({"ok": False,
+                    "error": f"Temp must be {sensibo_mod.MIN_TEMP_F}-{sensibo_mod.MAX_TEMP_F}°F"}), 400
+        client = sensibo_mod.SensiboClient(api_key=api_key)
+        ok = client.set_ac_state_many(
+            device_id,
+            on=bool(on) if on is not None else (True if target_temp is not None else None),
+            target_temp=int(target_temp) if target_temp is not None else None,
+            fan_level=fan_level if fan_level else None,
+        )
+        if not ok:
+            return jsonify({"ok": False, "error": client.status_label()}), 502
+        return jsonify({"ok": True})
 
     @app.route("/m/inspections")
     def mobile_inspections():

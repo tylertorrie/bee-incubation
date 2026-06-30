@@ -10,10 +10,11 @@ Dependencies:
 """
 import sys
 import os
+import math
 import subprocess
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, date
 
 # Windows: run helper subprocesses (git, py_compile, poller) hidden so no
 # console window flashes up and steals focus while you're working.
@@ -26,6 +27,8 @@ import customtkinter as ctk
 import incubation_db as db
 import incubation_calc as calc
 import govee_client as govee_mod
+import sensibo_client as sensibo_mod
+import gcal_sync
 import qr_server
 import voc_db
 from voc_panel import VOCPanel
@@ -63,7 +66,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.12.5"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.25.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -277,6 +280,8 @@ class IncubatorDialog(ctk.CTkToplevel):
             ("Capacity (trays)",  "50",           "capacity"),
             ("Govee Device ID",   "AB:CD:EF:...", "govee_device_id"),
             ("Govee SKU / Model", "H5075",        "govee_sku"),
+            ("Sensibo Device ID(s)", "ID1, ID2",  "sensibo_device_id"),
+            ("Incubation Start (YYYY-MM-DD)", "2026-06-01", "incubation_start"),
         ]
         self._rows = {}
         for i, (lbl, ph, key) in enumerate(rows):
@@ -540,7 +545,7 @@ class SampleDialog(ctk.CTkToplevel):
             ("Total Gal Bees",      "total_volume_gal",  ""),
             ("Total KG for 2gal",   "kg_per_2gal",       ""),
             ("Total lbs for 2gal",  "lbs_per_2gal",      ""),
-            ("Total Trays",         "total_trays",       ""),
+            ("Expected Trays",      "total_trays",       ""),
             ("Incubator Space",     "incubator_space",   ""),
         ]
         self._rows = {}
@@ -582,7 +587,27 @@ class SampleDialog(ctk.CTkToplevel):
                 data[key] = float(val) if val else None
             except ValueError:
                 data[key] = None
-        db.upsert_sample(data)
+
+        if data.get("id"):
+            # Editing an existing sample — update it directly.
+            db.upsert_sample(data)
+        else:
+            # New sample: if one with this name already exists, update it (keeps
+            # tray links) rather than silently creating a duplicate.
+            existing = db.find_sample_by_name(name)
+            if existing:
+                if messagebox.askyesno(
+                    "Sample already exists",
+                    f"A sample named “{existing['name']}” already exists.\n\n"
+                    "Update that sample with these values?  (Recommended — keeps "
+                    "all its trays linked so the data shows on them.)\n\n"
+                    "Choose No to create a separate new sample anyway.",
+                    parent=self):
+                    db.upsert_sample_by_name(data)
+                else:
+                    db.upsert_sample(data)
+            else:
+                db.upsert_sample(data)
         if self.on_save:
             self.on_save()
         self.destroy()
@@ -887,6 +912,10 @@ class IncubationApp(ctk.CTk):
             api_key=db.get_setting("govee_api_key"),
             poll_interval_sec=POLL_INTERVAL_SEC,
         )
+        # Sensibo client (manual AC control only, no background polling)
+        self._sensibo = sensibo_mod.SensiboClient(
+            api_key=db.get_setting("sensibo_api_key"),
+        )
         self._card_widgets: dict = {}  # incubator_id → {temp, hum, dot, ts} labels
         self._detail_inc: dict = {}   # incubator being shown in detail view
 
@@ -906,6 +935,7 @@ class IncubationApp(ctk.CTk):
         self._views["incubators"]   = self._build_incubators_view()
         self._views["samples"]      = self._build_samples_view()
         self._views["trays"]        = self._build_trays_view()
+        self._views["analytics"]    = self._build_analytics_view()
         self._views["timeline"]     = self._build_timeline_view()
         self._views["inspections"]  = self._build_inspections_view()
         self._views["settings"]     = self._build_settings_view()
@@ -924,6 +954,11 @@ class IncubationApp(ctk.CTk):
 
         # Refresh status bar periodically
         self._tick()
+
+        # Watch for code updates (incl. git auto-sync pulls) and offer 1-click reload
+        self._start_code_watcher()
+        self.bind_all("<F5>", lambda e: self._restart_app())
+        self.bind_all("<Control-r>", lambda e: self._restart_app())
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
@@ -962,7 +997,8 @@ class IncubationApp(ctk.CTk):
             ("🌡️  Incubators",    "incubators"),
             ("🧪  Samples",       "samples"),
             ("📦  Trays",         "trays"),
-            ("📅  Timeline",      "timeline"),
+            ("📊  Analytics",     "analytics"),
+            ("📅  Calendar",      "timeline"),
             ("🔍  Inspections",   "inspections"),
             ("⚙️  Settings",      "settings"),
         ]
@@ -1003,6 +1039,14 @@ class IncubationApp(ctk.CTk):
         self._status_qr.pack(side="left", padx=16)
         self._status_time = _label(sb, "", FONT_S, SUBTEXT)
         self._status_time.pack(side="right", padx=16)
+
+        # Reload button — hidden until a code update is detected on disk.
+        self._reload_btn = ctk.CTkButton(
+            sb, text="🔄 Update ready — Reload", height=22, width=190,
+            corner_radius=6, font=("Segoe UI", 10, "bold"),
+            fg_color=DK_GOLD, hover_color=GOLD, text_color="black",
+            command=self._restart_app)
+        # not packed yet; shown by the watcher when files change
 
     # ── Navigation ────────────────────────────────────────────────────────────
 
@@ -1324,6 +1368,32 @@ class IncubationApp(ctk.CTk):
         _label(right, f"{_ts['count']} / {capacity} trays", FONT_S, TEXT).pack(anchor="e")
         _label(right, f"{fill_pct}% filled  •  {_ts['total_gals']:.1f} gal", FONT_S, SUBTEXT).pack(anchor="e")
 
+        # ── Sensibo AC manual controls (only when a device ID is configured) ──
+        if inc.get("sensibo_device_id"):
+            ac_row = ctk.CTkFrame(card, fg_color="transparent")
+            ac_row.pack(fill="x", padx=12, pady=(2, 6))
+            _label(ac_row, "AC:", FONT_S, SUBTEXT).pack(side="left", padx=(2, 6))
+            _t_lbl, _t_fg, _t_tc = self._ac_toggle_style(inc["sensibo_device_id"])
+            _ac_power_btn = ctk.CTkButton(
+                ac_row, text=_t_lbl, width=82, height=28, corner_radius=14,
+                fg_color=_t_fg, hover_color=BORDER, text_color=_t_tc,
+                font=("Segoe UI", 11, "bold"),
+                command=lambda i=inc["id"], d=inc["sensibo_device_id"]: self._sensibo_toggle_power(i, d),
+            )
+            _ac_power_btn.pack(side="left", padx=2)
+            _ac_temp_btn = _btn(ac_row, self._ac_temp_label(inc["sensibo_device_id"]),
+                 lambda i=inc["id"], d=inc["sensibo_device_id"], n=inc["name"]: self._sensibo_prompt_temp(i, d, n),
+                 width=78, height=28, fg=CARD2, hover=BORDER)
+            _ac_temp_btn.pack(side="left", padx=2)
+            _ac_fan_btn = _btn(ac_row, self._ac_fan_label(inc["sensibo_device_id"]),
+                 lambda i=inc["id"], d=inc["sensibo_device_id"], n=inc["name"]: self._sensibo_prompt_fan(i, d, n),
+                 width=78, height=28, fg=CARD2, hover=BORDER)
+            _ac_fan_btn.pack(side="left", padx=2)
+            # Store refs so Sensibo handlers can update just these without full refresh
+            self._card_widgets[inc["id"]]["ac_power"] = _ac_power_btn
+            self._card_widgets[inc["id"]]["ac_temp"]  = _ac_temp_btn
+            self._card_widgets[inc["id"]]["ac_fan"]   = _ac_fan_btn
+
         # ── Inspection badges (hidden when the incubator is off — no inspections needed) ──
         if not is_hidden and not calc.is_off(inc):
             brow = ctk.CTkFrame(card, fg_color="transparent")
@@ -1438,6 +1508,25 @@ class IncubationApp(ctk.CTk):
                          f"({inc.get('govee_sku') or '—'})")
             _label(left, govee_txt, FONT_S, SUBTEXT).pack(anchor="w")
 
+            # Sensibo AC manual control (only if a device ID is configured)
+            if inc.get("sensibo_device_id"):
+                ac_row = ctk.CTkFrame(left, fg_color="transparent")
+                ac_row.pack(anchor="w", pady=(6, 0))
+                _label(ac_row, "AC:", FONT_S, SUBTEXT).pack(side="left", padx=(0, 6))
+                _it_lbl, _it_fg, _it_tc = self._ac_toggle_style(inc["sensibo_device_id"])
+                ctk.CTkButton(
+                    ac_row, text=_it_lbl, width=80, height=24, corner_radius=12,
+                    fg_color=_it_fg, hover_color=BORDER, text_color=_it_tc,
+                    font=("Segoe UI", 10, "bold"),
+                    command=lambda i=inc["id"], d=inc["sensibo_device_id"]: self._sensibo_toggle_power(i, d),
+                ).pack(side="left", padx=2)
+                _btn(ac_row, self._ac_temp_label(inc["sensibo_device_id"]),
+                     lambda i=inc["id"], d=inc["sensibo_device_id"], n=inc["name"]: self._sensibo_prompt_temp(i, d, n),
+                     width=78, height=24, fg=CARD2, hover=BORDER).pack(side="left", padx=2)
+                _btn(ac_row, self._ac_fan_label(inc["sensibo_device_id"]),
+                     lambda i=inc["id"], d=inc["sensibo_device_id"], n=inc["name"]: self._sensibo_prompt_fan(i, d, n),
+                     width=78, height=24, fg=CARD2, hover=BORDER).pack(side="left", padx=2)
+
             # Temp-mode selector — turn the incubator on/off and pick its mode here
             mode_row = ctk.CTkFrame(left, fg_color="transparent")
             mode_row.pack(anchor="w", pady=(6, 0))
@@ -1522,12 +1611,78 @@ class IncubationApp(ctk.CTk):
         _btn(hdr, "+ Add Sample", lambda: self._open_sample_dialog(),
              fg=CARD, hover=CARD2, width=130).pack(side="right", padx=6)
 
-        cols = ("Name", "Total Kg", "Live Bees/Kg", "Parasites", "Chalkbrood",
-                "Total Gal", "Kg for 2gal", "Total Trays", "Inc. Space", "Notes")
+        # Search box — filter the sample list by name as you type
+        sbar = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=8)
+        sbar.pack(fill="x", padx=12, pady=(0, 6))
+        _label(sbar, "Search:", FONT_S, SUBTEXT).pack(side="left", padx=10, pady=6)
+        self._smp_search = ctk.CTkEntry(
+            sbar, placeholder_text="Sample name…", width=260,
+            fg_color=CARD2, border_color=BORDER, text_color=TEXT)
+        self._smp_search.pack(side="left", padx=6, pady=6)
+        self._smp_search.bind("<KeyRelease>", lambda e: self._refresh_samples())
+
+        # Year filter — samples used by trays started in the chosen year
+        _smp_years = self._tray_years()
+        self._smp_year = _combo(sbar, ["All Years"] + _smp_years, 120)
+        _cur_year = str(datetime.now().year)
+        self._smp_year.set(_cur_year if _cur_year in _smp_years else "All Years")
+        self._smp_year.pack(side="left", padx=6, pady=6)
+        self._smp_year.configure(command=lambda _: self._refresh_samples())
+
+        self._smp_count_lbl = _label(sbar, "", FONT_S, SUBTEXT)
+        self._smp_count_lbl.pack(side="right", padx=12, pady=6)
+
+        self._smp_cols = ("Name", "Total Kg", "Live Bees/Kg", "Parasites", "Chalkbrood",
+                "Total Gal", "Kg for 2gal", "Expected Trays", "Actual Trays",
+                "Inc. Space", "Notes")
+        cols = self._smp_cols
         self._smp_tree = self._make_tree(frame, cols)
         self._smp_tree.pack(fill="both", expand=True, padx=12, pady=4)
         self._smp_tree.bind("<Double-1>", self._on_sample_double_click)
+        self._smp_sort_col = None
+        self._smp_sort_asc = True
+        for ci, col in enumerate(cols):
+            self._smp_tree.heading(col, text=col,
+                command=lambda c=ci: self._sort_sample_tree(c))
         return frame
+
+    def _sort_sample_tree(self, col_idx: int):
+        tree = self._smp_tree
+        if self._smp_sort_col == col_idx:
+            self._smp_sort_asc = not self._smp_sort_asc
+        else:
+            self._smp_sort_col = col_idx
+            self._smp_sort_asc = True
+
+        cols = self._smp_cols
+        for ci, col in enumerate(cols):
+            arrow = (" ↑" if self._smp_sort_asc else " ↓") if ci == col_idx else ""
+            tree.heading(col, text=col + arrow,
+                command=lambda c=ci: self._sort_sample_tree(c))
+
+        # Read values positionally (column names contain spaces/'/' which ttk
+        # can't resolve as lookup identifiers).
+        rows = []
+        for iid in tree.get_children():
+            vals = tree.item(iid, "values")
+            sort_val = vals[col_idx] if col_idx < len(vals) else ""
+            name_val = vals[0] if vals else ""
+            rows.append((sort_val, name_val, iid))
+
+        def _sort_key(val):
+            # Consistent 3-part tuple so a column can mix numbers and text
+            # without raising. Order: numbers, then text, then blanks.
+            if val is None or val == "—":
+                return (2, 0.0, "")
+            try:
+                return (0, float(str(val).replace("%", "").replace(",", "")), "")
+            except (ValueError, AttributeError):
+                return (1, 0.0, str(val).lower())
+
+        rows.sort(key=lambda x: _sort_key(x[1]))               # secondary: name
+        rows.sort(key=lambda x: _sort_key(x[0]), reverse=not self._smp_sort_asc)
+        for idx, (_, _, iid) in enumerate(rows):
+            tree.move(iid, "", idx)
 
     def _refresh_samples(self):
         tree = self._smp_tree
@@ -1550,7 +1705,25 @@ class IncubationApp(ctk.CTk):
                 return f"{per_lb_val / 0.45359237:,.{dec}f}"
             return "—"
 
-        for s in db.get_samples():
+        q = ""
+        if getattr(self, "_smp_search", None) is not None:
+            q = self._smp_search.get().strip().lower()
+
+        samples = db.get_samples()
+        actual_counts = db.get_tray_counts_by_sample(statuses=None)  # all trays per sample
+
+        # Year filter — keep samples used by trays started in the chosen year
+        yr = getattr(self, "_smp_year", None)
+        yr = yr.get() if yr else "All Years"
+        if yr and yr != "All Years":
+            year_ids = db.current_year_sample_ids(int(yr))
+            samples = [s for s in samples if s["id"] in year_ids]
+
+        shown = 0
+        for s in samples:
+            if q and q not in (s["name"] or "").lower():
+                continue
+            shown += 1
             tree.insert("", "end", iid=str(s["id"]), values=(
                 s["name"],
                 _kg(s.get("total_weight_lbs"), s.get("total_weight_kg")),
@@ -1559,10 +1732,15 @@ class IncubationApp(ctk.CTk):
                 _n(s.get("chalkbrood")),
                 _n(s.get("total_volume_gal")),
                 _kg(s.get("lbs_per_2gal"), s.get("kg_per_2gal"), 2),
-                _n(s.get("total_trays"), 0),
+                (str(math.ceil(s["total_trays"]))
+                 if isinstance(s.get("total_trays"), (int, float)) else "—"),
+                str(actual_counts.get(s["id"], 0)),
                 s.get("incubator_space") or "—",
                 s.get("notes") or "",
             ))
+        if getattr(self, "_smp_count_lbl", None) is not None:
+            self._smp_count_lbl.configure(
+                text=f"{shown} of {len(samples)} samples" if q else f"{len(samples)} samples")
 
     def _on_sample_double_click(self, event):
         sel = self._smp_tree.selection()
@@ -1573,6 +1751,172 @@ class IncubationApp(ctk.CTk):
         sample  = next((s for s in samples if s["id"] == sid), None)
         if sample:
             self._open_sample_dialog(sample)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  ANALYTICS VIEW
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _build_analytics_view(self) -> ctk.CTkFrame:
+        frame = ctk.CTkFrame(self._main, fg_color="transparent", corner_radius=0)
+        hdr = ctk.CTkFrame(frame, fg_color="transparent")
+        hdr.pack(fill="x", padx=20, pady=(16, 8))
+        _label(hdr, "Analytics", FONT_H, GOLD).pack(side="left")
+        _btn(hdr, "Refresh", self._refresh_analytics, fg=DK_GOLD, hover=GOLD,
+             text_color="black", width=100).pack(side="right")
+        _yrs = self._tray_years()
+        self._an_year = _combo(hdr, ["All Years"] + _yrs, 120)
+        _cur = str(datetime.now().year)
+        self._an_year.set(_cur if _cur in _yrs else "All Years")
+        self._an_year.pack(side="right", padx=8)
+        self._an_year.configure(command=lambda _: self._refresh_analytics())
+        self._an_body = ctk.CTkScrollableFrame(frame, fg_color="transparent")
+        self._an_body.pack(fill="both", expand=True, padx=12, pady=4)
+        return frame
+
+    def _refresh_analytics(self):
+        body = self._an_body
+        for w in body.winfo_children():
+            w.destroy()
+
+        yr = self._an_year.get() if getattr(self, "_an_year", None) else "All Years"
+        year = None if yr == "All Years" else int(yr)
+
+        samples = db.get_samples()
+        if year is not None:
+            ids = db.current_year_sample_ids(year)
+            samples = [s for s in samples if s["id"] in ids]
+        actual = db.get_tray_counts_by_sample(statuses=None)
+
+        self._an_kpi_cards(body, samples, actual)
+        self._an_bar_chart(body, "Live bees / kg by sample (high → low)",
+                           samples, "live_bees_per_kg", "{:,.0f}", "#FFD700")
+        self._an_bar_chart(body, "Parasite % by sample (high → low)",
+                           samples, "parasites", "{:.1f}%", "#EF4444")
+        self._an_bar_chart(body, "Chalkbrood % by sample (high → low)",
+                           samples, "chalkbrood", "{:.1f}%", "#F59E0B")
+        self._an_temp_stability(body)
+        self._an_cycle_stats(body, year)
+
+    def _an_card(self, parent, title):
+        card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=10)
+        card.pack(fill="x", padx=4, pady=6)
+        _label(card, title, FONT_H, GOLD).pack(anchor="w", padx=14, pady=(10, 2))
+        return card
+
+    def _an_kpi_cards(self, parent, samples, actual):
+        def avg(key):
+            vals = [s[key] for s in samples if isinstance(s.get(key), (int, float))]
+            return sum(vals) / len(vals) if vals else None
+
+        a_live, a_par, a_chalk = avg("live_bees_per_kg"), avg("parasites"), avg("chalkbrood")
+        exp = sum(s["total_trays"] for s in samples if isinstance(s.get("total_trays"), (int, float)))
+        act = sum(actual.get(s["id"], 0) for s in samples)
+        cards = [
+            ("Samples", str(len(samples))),
+            ("Avg live bees/kg", f"{a_live:,.0f}" if a_live is not None else "—"),
+            ("Avg parasite %", f"{a_par:.1f}%" if a_par is not None else "—"),
+            ("Avg chalkbrood %", f"{a_chalk:.1f}%" if a_chalk is not None else "—"),
+            ("Trays exp / actual", f"{math.ceil(exp)} / {act}"),
+        ]
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=(4, 8))
+        for lbl, val in cards:
+            c = ctk.CTkFrame(row, fg_color=CARD, corner_radius=10)
+            c.pack(side="left", expand=True, fill="x", padx=4)
+            _label(c, val, ("Segoe UI", 20, "bold"), GOLD).pack(pady=(12, 0))
+            _label(c, lbl, FONT_S, SUBTEXT).pack(pady=(0, 12))
+
+    def _an_bar_chart(self, parent, title, samples, key, fmt, color, top=15):
+        card = self._an_card(parent, title)
+        data = [(s["name"], s[key]) for s in samples
+                if isinstance(s.get(key), (int, float))]
+        if not data:
+            _label(card, "No data for this selection.", FONT_S, SUBTEXT).pack(
+                padx=14, pady=(0, 12))
+            return
+        data.sort(key=lambda x: x[1], reverse=True)
+        data = data[:top]
+        if not HAS_MPL:
+            for nm, v in data:
+                _label(card, f"{nm}: {fmt.format(v)}", FONT_S, TEXT).pack(
+                    anchor="w", padx=18, pady=1)
+            ctk.CTkFrame(card, fg_color="transparent", height=8).pack()
+            return
+        names = [d[0] for d in data][::-1]
+        vals  = [d[1] for d in data][::-1]
+        fig = Figure(figsize=(9, max(2.0, 0.34 * len(names) + 0.5)), facecolor="#1F2937")
+        ax = fig.add_subplot(111)
+        ax.set_facecolor("#1F2937")
+        bars = ax.barh(names, vals, color=color)
+        ax.tick_params(colors="#9CA3AF", labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#374151")
+        xmax = max(vals) if vals else 0
+        ax.set_xlim(0, xmax * 1.15 if xmax else 1)
+        for b, v in zip(bars, vals):
+            ax.text(b.get_width(), b.get_y() + b.get_height() / 2,
+                    " " + fmt.format(v), va="center", color="#F3F4F6", fontsize=7)
+        fig.tight_layout(pad=1.0)
+        cv = FigureCanvasTkAgg(fig, master=card)
+        cv.draw()
+        cv.get_tk_widget().pack(fill="x", padx=8, pady=(0, 8))
+
+    def _an_temp_stability(self, parent):
+        card = self._an_card(parent, "Incubator temperature stability (last 30 days)")
+        grid = ctk.CTkFrame(card, fg_color="transparent")
+        grid.pack(fill="x", padx=14, pady=(0, 12))
+        heads = ["Incubator", "Readings", "% in range", "Avg temp"]
+        for ci, h in enumerate(heads):
+            grid.columnconfigure(ci, weight=1)
+            _label(grid, h, FONT_S, SUBTEXT).grid(row=0, column=ci, sticky="w", padx=6, pady=2)
+        unit = db.get_setting("temp_unit", "C")
+        r = 1
+        for inc in db.get_incubators(include_hidden=False):
+            readings = db.get_readings_hours(inc["id"], 24 * 30)
+            temps = [x["temperature_c"] for x in readings if x["temperature_c"] is not None]
+            t_min, t_max = calc.get_temp_range(inc)
+            if not temps or t_min is None:
+                pct_txt, avg_txt = "—", "—"
+                pct_col = SUBTEXT
+            else:
+                pct = 100 * sum(1 for t in temps if t_min <= t <= t_max) / len(temps)
+                avg = sum(temps) / len(temps)
+                pct_txt = f"{pct:.0f}%"
+                pct_col = GREEN if pct >= 90 else (ORANGE if pct >= 70 else RED)
+                avg_txt = calc.format_temp(avg, unit)
+            _label(grid, inc["name"], FONT_B, TEXT).grid(row=r, column=0, sticky="w", padx=6, pady=2)
+            _label(grid, str(len(temps)), FONT_S, SUBTEXT).grid(row=r, column=1, sticky="w", padx=6, pady=2)
+            _label(grid, pct_txt, FONT_B, pct_col).grid(row=r, column=2, sticky="w", padx=6, pady=2)
+            _label(grid, avg_txt, FONT_S, TEXT).grid(row=r, column=3, sticky="w", padx=6, pady=2)
+            r += 1
+
+    def _an_cycle_stats(self, parent, year):
+        card = self._an_card(parent, "Cycle & cool-down stats")
+        trays = db.get_trays()
+        if year is not None:
+            trays = [t for t in trays
+                     if (lambda d: d is not None and d.year == year)(
+                         _parse_date_loose(t.get("in_date")))]
+        cool = [d for d in (cool_down_days(t) for t in trays) if d is not None]
+        incub = []
+        for t in trays:
+            ind = _parse_date_loose(t.get("in_date"))
+            outd = _parse_date_loose(t.get("out_date"))
+            if ind and outd and outd >= ind:
+                incub.append((outd - ind).days)
+        lines = []
+        lines.append(f"Trays in selection: {len(trays)}")
+        if cool:
+            lines.append(f"Cool-down days — avg {sum(cool)/len(cool):.1f}, "
+                         f"min {min(cool)}, max {max(cool)}  (n={len(cool)})")
+        else:
+            lines.append("Cool-down days — no cooled/released trays yet")
+        if incub:
+            lines.append(f"Incubation length (start→release) — avg {sum(incub)/len(incub):.1f} days  "
+                         f"(n={len(incub)})")
+        for ln in lines:
+            _label(card, ln, FONT_B, TEXT).pack(anchor="w", padx=18, pady=2)
+        ctk.CTkFrame(card, fg_color="transparent", height=6).pack()
 
     # ══════════════════════════════════════════════════════════════════════════
     #  TRAYS VIEW
@@ -1624,6 +1968,22 @@ class IncubationApp(ctk.CTk):
         self._flt_status.pack(side="left", padx=6, pady=6)
         self._flt_status.configure(command=lambda _: self._refresh_trays())
 
+        # Year filter — based on each tray's Start Date (defaults to current year)
+        _tray_yrs = self._tray_years()
+        self._flt_year = _combo(fbar, ["All Years"] + _tray_yrs, 120)
+        _cur_year = str(datetime.now().year)
+        self._flt_year.set(_cur_year if _cur_year in _tray_yrs else "All Years")
+        self._flt_year.pack(side="left", padx=6, pady=6)
+        self._flt_year.configure(command=lambda _: self._refresh_trays())
+
+        # Sample look-up — show only trays of the chosen sample
+        self._flt_sample_map = {"All Samples": None}
+        self._flt_sample_map.update({s["name"]: s["id"] for s in db.get_samples()})
+        self._flt_sample = _combo(fbar, list(self._flt_sample_map.keys()), 200)
+        self._flt_sample.set("All Samples")
+        self._flt_sample.pack(side="left", padx=6, pady=6)
+        self._flt_sample.configure(command=lambda _: self._refresh_trays())
+
         # Cool-down summary for the currently-shown trays
         self._cooldown_lbl = _label(fbar, "", FONT_S, TEAL)
         self._cooldown_lbl.pack(side="right", padx=12, pady=6)
@@ -1660,18 +2020,42 @@ class IncubationApp(ctk.CTk):
             tree.heading(col, text=col + arrow,
                 command=lambda c=ci: self._sort_tray_tree(c))
 
-        rows = [(tree.set(iid, cols[col_idx]), iid) for iid in tree.get_children()]
+        # Read values positionally — column names contain spaces/'%'/'#' which
+        # ttk does not handle reliably as set()/lookup identifiers.
+        rows = []
+        for iid in tree.get_children():
+            vals = tree.item(iid, "values")
+            sort_val = vals[col_idx] if col_idx < len(vals) else ""
+            tray_val = vals[0] if vals else ""
+            rows.append((sort_val, tray_val, iid))
 
         def _sort_key(val):
-            # Try numeric sort for number columns, fallback to string
+            # Always return a 3-part tuple of consistent types so a column can
+            # mix numbers and text (e.g. sample names "402" and "B16") without
+            # raising "can't compare float to str". Group order: numbers, then
+            # text, then blanks ("—") last.
+            if val is None or val == "—":
+                return (2, 0.0, "")
             try:
-                return (0, float(val.replace("%", "").replace("—", ""))) if val != "—" else (1, "")
+                return (0, float(val.replace("%", "").replace(",", "")), "")
             except (ValueError, AttributeError):
-                return (0, val.lower()) if val != "—" else (1, "")
+                return (1, 0.0, str(val).lower())
 
+        # Primary sort by the clicked column (direction toggles); within ties,
+        # always order by tray number ascending so same-sample trays group nicely.
+        rows.sort(key=lambda x: _sort_key(x[1]))               # secondary: tray #
         rows.sort(key=lambda x: _sort_key(x[0]), reverse=not self._tray_sort_asc)
-        for idx, (_, iid) in enumerate(rows):
+        for idx, (_, _, iid) in enumerate(rows):
             tree.move(iid, "", idx)
+
+    def _tray_years(self) -> list:
+        """Distinct years present in tray Start Dates, newest first (as strings)."""
+        years = set()
+        for t in db.get_trays():
+            d = _parse_date_loose(t.get("in_date"))
+            if d:
+                years.add(d.year)
+        return [str(y) for y in sorted(years, reverse=True)]
 
     def _refresh_trays(self):
         tree = self._tray_tree
@@ -1690,17 +2074,31 @@ class IncubationApp(ctk.CTk):
         _flt = self._flt_status.get()
         status = None if _flt == "All" else db.tray_status_value(_flt)
 
-        trays = db.get_trays(incubator_id=inc_id, status=status)
+        sample_id = None
+        _fs = getattr(self, "_flt_sample", None)
+        if _fs is not None:
+            sample_id = self._flt_sample_map.get(_fs.get())
+
+        trays = db.get_trays(incubator_id=inc_id, sample_id=sample_id, status=status)
+
+        # Year filter — keep trays whose Start Date falls in the chosen year
+        yr = getattr(self, "_flt_year", None)
+        yr = yr.get() if yr else "All Years"
+        if yr and yr != "All Years":
+            trays = [t for t in trays
+                     if (lambda d: d is not None and str(d.year) == yr)(
+                         _parse_date_loose(t.get("in_date")))]
+
         # Build all row tuples first, then insert in one pass
         rows = [
             (str(t["id"]), (
                 t["tray_number"],
                 t.get("sample_name") or "—",
                 t.get("incubator_name") or "—",
-                f"{t['weight_lbs'] * 0.45359237:.2f}" if t.get("weight_lbs") else "—",
-                t.get("live_count") or "—",
-                f"{t['parasite_level_pct']:.1f}%" if t.get("parasite_level_pct") else "—",
-                f"{t['sample_chalkbrood']:.1f}%" if t.get("sample_chalkbrood") else "—",
+                f"{t['sample_kg_per_2gal']:.2f}" if t.get("sample_kg_per_2gal") else "—",
+                f"{t['sample_live_per_kg']:,.0f}" if t.get("sample_live_per_kg") else "—",
+                f"{t['sample_parasites']:.1f}%" if t.get("sample_parasites") is not None else "—",
+                f"{t['sample_chalkbrood']:.1f}%" if t.get("sample_chalkbrood") is not None else "—",
                 t.get("in_date") or "—",
                 t.get("out_date") or "—",
                 (lambda d: f"{d}d" if d is not None else "—")(cool_down_days(t)),
@@ -1779,66 +2177,402 @@ class IncubationApp(ctk.CTk):
     #  TIMELINE VIEW
     # ══════════════════════════════════════════════════════════════════════════
 
+    # Incubation milestone days (offset from start, Day 1 = start) → (label, color)
+    # Matches the developmental-stage timeline and the field spreadsheet.
+    _INC_MILESTONES = [
+        (1,  "Incubation Start",     "#10B981"),
+        (7,  "Vapona In",            "#8B5CF6"),
+        (13, "Vapona Out",           "#D946EF"),
+        (14, "Earliest We Can Cool", "#06B6D4"),
+        (18, "10% Male Emergence",   "#6366F1"),
+        (23, "Expected Release",     "#F59E0B"),
+        (37, "Latest Release",       "#EF4444"),
+    ]
+
+    # Distinct colors assigned per incubator, drawn from the dashboard theme
+    # (BLUE / GREEN / ORANGE / TEAL / RED / dark-gold) plus a couple of
+    # complementary accents — all readable with white chip text.
+    _INC_PALETTE = [
+        BLUE, GREEN, ORANGE, "#8B5CF6", TEAL,
+        DK_GOLD, "#EC4899", RED, "#0EA5E9", "#A16207",
+    ]
+
+    def _inc_color_map(self) -> dict:
+        """Stable {incubator_id: color} mapping by display order."""
+        incs = db.get_incubators(include_hidden=False)
+        return {i["id"]: self._INC_PALETTE[idx % len(self._INC_PALETTE)]
+                for idx, i in enumerate(incs)}
+
     def _build_timeline_view(self) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(self._main, fg_color="transparent", corner_radius=0)
 
         hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.pack(fill="x", padx=20, pady=(16, 8))
-        _label(hdr, "Upcoming Timeline", FONT_H, GOLD).pack(side="left")
+        hdr.pack(fill="x", padx=20, pady=(16, 4))
+        _label(hdr, "Calendar", FONT_H, GOLD).pack(side="left")
+        _btn(hdr, "📅 Export to Calendar", self._export_calendar,
+             fg=BLUE, hover="#1D4ED8", text_color="white", width=170).pack(side="right", padx=(8, 0))
+        _btn(hdr, "➕ Schedule Incubator", self._schedule_incubator,
+             fg=GREEN, hover="#15803D", text_color="white", width=180).pack(side="right", padx=(8, 0))
+        _btn(hdr, "Today", self._cal_today, fg=DK_GOLD, hover=GOLD,
+             text_color="black", width=70).pack(side="right", padx=(8, 0))
 
-        self._tl_days_var = ctk.StringVar(value="30")
-        _label(hdr, "Lookahead:", FONT_S, SUBTEXT).pack(side="right", padx=(6,2))
-        tl_spin = _combo(hdr, ["7", "14", "30", "60", "90"], 80)
-        tl_spin.set("30")
-        tl_spin.pack(side="right", padx=4)
-        tl_spin.configure(command=lambda _: self._refresh_timeline())
-        self._tl_spin = tl_spin
+        # Centered month navigation: ‹  Month Year  ›
+        monthbar = ctk.CTkFrame(frame, fg_color="transparent")
+        monthbar.pack(fill="x", pady=(2, 8))
+        nav = ctk.CTkFrame(monthbar, fg_color="transparent")
+        nav.pack()  # no fill → stays centered horizontally
+        _btn(nav, "‹", self._cal_prev, width=40, height=40, fg=CARD, hover=CARD2,
+             text_color=GOLD).pack(side="left", padx=4)
+        self._tl_month_lbl = _label(nav, "", ("Segoe UI", 28, "bold"), GOLD)
+        self._tl_month_lbl.pack(side="left", padx=20)
+        _btn(nav, "›", self._cal_next, width=40, height=40, fg=CARD, hover=CARD2,
+             text_color=GOLD).pack(side="left", padx=4)
 
-        self._tl_scroll = ctk.CTkScrollableFrame(
-            frame, fg_color="transparent", corner_radius=0)
+        _t = date.today()
+        self._cal_year, self._cal_month = _t.year, _t.month
+
+        # Plain (non-scrolling) container so the whole month fits on one page
+        self._tl_scroll = ctk.CTkFrame(frame, fg_color="transparent", corner_radius=0)
         self._tl_scroll.pack(fill="both", expand=True, padx=12, pady=4)
         return frame
 
+    def _inc_start_date(self, inc_id: int):
+        """Start date of an incubator's current incubation = the most common
+        start date among its active trays. None if no active trays."""
+        from collections import Counter
+        counts = Counter()
+        for t in db.get_trays(incubator_id=inc_id, status="active"):
+            d = _parse_date_loose(t.get("in_date"))
+            if d:
+                counts[d] += 1
+        return counts.most_common(1)[0][0] if counts else None
+
+    def _incubation_events(self) -> list:
+        """All milestone events across incubators with a start date.
+        Each: {date, label, inc, color, day}. Start date prefers the explicit
+        Edit-Setup value, falling back to the active-tray-derived date."""
+        from datetime import timedelta
+        cmap = self._inc_color_map()
+        out = []
+        for inc in db.get_incubators(include_hidden=False):
+            raw = (inc.get("incubation_start") or "").strip()
+            if raw == "none":
+                continue  # schedule explicitly removed — don't auto-derive
+            start = _parse_date_loose(raw) or self._inc_start_date(inc["id"])
+            if not start:
+                continue
+            inc_color = cmap.get(inc["id"], BLUE)
+            for day, label, color in self._INC_MILESTONES:
+                out.append({
+                    "date":  start + timedelta(days=day - 1),
+                    "label": label, "inc": inc["name"], "inc_id": inc["id"],
+                    "color": inc_color, "day": day,
+                })
+        return out
+
+    def _cal_prev(self):
+        self._cal_month -= 1
+        if self._cal_month < 1:
+            self._cal_month, self._cal_year = 12, self._cal_year - 1
+        self._refresh_timeline()
+
+    def _cal_next(self):
+        self._cal_month += 1
+        if self._cal_month > 12:
+            self._cal_month, self._cal_year = 1, self._cal_year + 1
+        self._refresh_timeline()
+
+    def _cal_today(self):
+        t = date.today()
+        self._cal_year, self._cal_month = t.year, t.month
+        self._refresh_timeline()
+
     def _refresh_timeline(self):
+        import calendar as _cal
         container = self._tl_scroll
         for w in container.winfo_children():
             w.destroy()
 
-        try:
-            lookahead = int(self._tl_spin.get())
-        except Exception:
-            lookahead = 30
+        y, m = self._cal_year, self._cal_month
+        self._tl_month_lbl.configure(text=f"{_cal.month_name[m]} {y}")
 
-        batches = db.get_batches(status="active")
-        events  = calc.get_all_events(batches, lookahead)
+        # Events keyed by exact date; collect incubators present for the legend
+        evs = self._incubation_events()
+        by_date = {}
+        inc_legend = {}   # incubator name → color
+        for ev in evs:
+            by_date.setdefault(ev["date"], []).append(ev)
+            inc_legend.setdefault(ev["inc"], ev["color"])
 
+        today = date.today()
+
+        # Outer card wraps the whole calendar for a cleaner framed look
+        cal_card = ctk.CTkFrame(container, fg_color=CARD, corner_radius=14)
+        cal_card.pack(fill="both", expand=True, padx=4, pady=(2, 6))
+
+        grid = ctk.CTkFrame(cal_card, fg_color="transparent")
+        grid.pack(fill="both", expand=True, padx=8, pady=8)
+
+        # Weekday header row (fixed height); the 6 week rows share the rest equally
+        weekdays = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+        grid.rowconfigure(0, weight=0)
+        for c, wd in enumerate(weekdays):
+            grid.columnconfigure(c, weight=1, uniform="cal")
+            _label(grid, wd, ("Segoe UI", 10, "bold"), SUBTEXT).grid(
+                row=0, column=c, sticky="ew", padx=2, pady=(0, 4))
+
+        # Render the month's natural number of weeks (usually 5) so rows stay
+        # tall enough to read — adjacent-month days fill out the first/last weeks.
+        weeks = _cal.Calendar(firstweekday=0).monthdatescalendar(y, m)
+
+        for r, week in enumerate(weeks, start=1):
+            grid.rowconfigure(r, weight=1, uniform="calrow")
+            for c, d in enumerate(week):
+                in_month = (d.month == m)
+                is_today = (d == today)
+                cell_bg = "#243044" if is_today else ("#161E2C" if not in_month else CARD2)
+                cell = ctk.CTkFrame(
+                    grid, fg_color=cell_bg, corner_radius=8,
+                    border_width=2 if is_today else 0,
+                    border_color=GOLD if is_today else BORDER)
+                cell.grid(row=r, column=c, sticky="nsew", padx=2, pady=2)
+                cell.grid_propagate(False)   # share grid space equally; content won't resize it
+
+                # Day number — today gets a filled gold badge
+                num_row = ctk.CTkFrame(cell, fg_color="transparent")
+                num_row.pack(fill="x", padx=5, pady=(2, 0))
+                if is_today:
+                    ctk.CTkLabel(num_row, text=str(d.day), width=20, height=20,
+                                 corner_radius=10, fg_color=GOLD, text_color="black",
+                                 font=("Segoe UI", 10, "bold")).pack(side="left")
+                else:
+                    daycol = TEXT if in_month else "#4B5563"
+                    _label(num_row, str(d.day), ("Segoe UI", 11, "bold"), daycol).pack(side="left")
+
+                for ev in by_date.get(d, []):
+                    chip = ctk.CTkFrame(cell, fg_color=ev["color"], corner_radius=4)
+                    chip.pack(fill="x", padx=4, pady=1)
+                    ctk.CTkLabel(
+                        chip, text=f"{ev['inc']} · {ev['label']}",
+                        font=("Segoe UI", 9, "bold"), text_color="white",
+                        anchor="w", justify="left", wraplength=150).pack(
+                        fill="x", padx=5, pady=1)
+
+        # Legend — incubators (color-coded) + milestone day reference
+        legend = ctk.CTkFrame(container, fg_color="transparent")
+        legend.pack(fill="x", padx=6, pady=(4, 0))
+        _label(legend, "Incubators:", FONT_B, SUBTEXT).pack(side="left", padx=(2, 10))
+        for name, color in inc_legend.items():
+            chip = ctk.CTkFrame(legend, fg_color=color, corner_radius=5)
+            chip.pack(side="left", padx=4, pady=2)
+            ctk.CTkLabel(chip, text=f" {name} ",
+                         font=("Segoe UI", 10, "bold"), text_color="white").pack(padx=5, pady=2)
+
+        days_ref = "   ".join(f"{lbl} (Day {day})" for day, lbl, _ in self._INC_MILESTONES)
+        _label(container, "Milestones:  " + days_ref, FONT_S, SUBTEXT).pack(
+            anchor="w", padx=8, pady=(2, 6))
+
+    def _export_calendar(self):
+        """Write all incubation milestones to an .ics file that imports straight
+        into Google Calendar (or any calendar app)."""
+        import uuid
+        from datetime import timedelta
+        events = self._incubation_events()
         if not events:
-            _label(container,
-                   "No upcoming events in the next "
-                   f"{lookahead} days.\n"
-                   "Add batches with dates in the Incubators view.",
-                   FONT_B, SUBTEXT).pack(pady=40)
+            messagebox.showinfo("Export", "No incubation milestones to export.\n"
+                "Set an Incubation Start date for at least one incubator.", parent=self)
             return
-
-        current_date = None
+        path = filedialog.asksaveasfilename(
+            title="Export incubation calendar",
+            defaultextension=".ics", filetypes=[("Calendar file", "*.ics")],
+            initialfile="incubation_timeline.ics")
+        if not path:
+            return
+        stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        lines = ["BEGIN:VCALENDAR", "VERSION:2.0",
+                 "PRODID:-//Bee Incubation Manager//Timeline//EN", "CALSCALE:GREGORIAN"]
         for ev in events:
-            # Date divider
-            if ev["date"] != current_date:
-                current_date = ev["date"]
-                div = ctk.CTkFrame(container, fg_color=BORDER, height=1)
-                div.pack(fill="x", pady=(10, 0))
-                day_txt = f"  {current_date}  —  {calc.format_days(ev['days_away'])}  "
-                _label(container, day_txt, FONT_S, SUBTEXT).pack(anchor="w", padx=4)
+            d0 = ev["date"]
+            d1 = d0 + timedelta(days=1)   # all-day event: DTEND is exclusive next day
+            summary = f"{ev['inc']} — {ev['label']} (Day {ev['day']})"
+            lines += [
+                "BEGIN:VEVENT",
+                f"UID:{uuid.uuid4()}@bee-incubation",
+                f"DTSTAMP:{stamp}",
+                f"DTSTART;VALUE=DATE:{d0.strftime('%Y%m%d')}",
+                f"DTEND;VALUE=DATE:{d1.strftime('%Y%m%d')}",
+                f"SUMMARY:{summary}",
+                "END:VEVENT",
+            ]
+        lines.append("END:VCALENDAR")
+        try:
+            with open(path, "w", encoding="utf-8", newline="\r\n") as f:
+                f.write("\n".join(lines))
+        except OSError as exc:
+            messagebox.showerror("Export", f"Could not save file:\n{exc}", parent=self)
+            return
+        messagebox.showinfo("Export complete",
+            f"Saved {len(events)} events to:\n{path}\n\n"
+            "To add them to Google Calendar:\n"
+            "1. Open Google Calendar (calendar.google.com)\n"
+            "2. Settings ⚙ → Import & export → Import\n"
+            "3. Choose this .ics file and pick a calendar.",
+            parent=self)
 
-            row = ctk.CTkFrame(container, fg_color=CARD, corner_radius=8)
-            row.pack(fill="x", padx=4, pady=2)
+    # ── Google Calendar sync ────────────────────────────────────────────────
 
-            col = RED if ev["urgent"] else (ORANGE if ev["days_away"] <= 5 else GREEN)
-            _label(row, f"●  {ev['label']}", FONT_B, col).pack(
-                side="left", padx=14, pady=8)
-            sub = f"{ev['incubator_name']}  ·  {ev['batch_name']}"
-            _label(row, sub, FONT_S, SUBTEXT).pack(side="left", padx=4)
-            _label(row, ev["date"], FONT_S, SUBTEXT).pack(side="right", padx=14)
+    def _gcal_token_path(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "gcal_token.json")
+
+    def _gcal_enabled(self) -> bool:
+        return (db.get_setting("gcal_enabled", "0") == "1"
+                and bool(db.get_setting("gcal_credentials_path")))
+
+    def _gcal_sync(self, interactive: bool = False, notify: bool = False):
+        """Push every incubator's milestones to Google Calendar (create/update),
+        deleting events for incubators without a schedule. Runs in a thread."""
+        if not gcal_sync.available():
+            if notify or interactive:
+                messagebox.showwarning("Google Calendar",
+                    "Google libraries aren't installed yet.\n"
+                    "Settings → Google Calendar Sync → Install Libraries.", parent=self)
+            return
+        creds = db.get_setting("gcal_credentials_path")
+        cal   = db.get_setting("gcal_calendar_id", "primary") or "primary"
+        if not creds:
+            if notify or interactive:
+                messagebox.showwarning("Google Calendar",
+                    "Set the OAuth credentials JSON path in Settings first.", parent=self)
+            return
+        gc = gcal_sync.GoogleCalendar(creds, self._gcal_token_path(), cal)
+
+        def _work():
+            from datetime import timedelta
+            if not gc.connect(interactive=interactive):
+                if notify or interactive:
+                    self.after(0, lambda: messagebox.showerror(
+                        "Google Calendar", gc.error or "Connection failed.", parent=self))
+                return
+            n = 0
+            for inc in db.get_incubators(include_hidden=False):
+                raw = (inc.get("incubation_start") or "").strip()
+                start = None if raw == "none" else (
+                    _parse_date_loose(raw) or self._inc_start_date(inc["id"]))
+                for day, label, _ in self._INC_MILESTONES:
+                    eid = gcal_sync.make_event_id(inc["id"], day)
+                    if start:
+                        gc.upsert(eid, f"{inc['name']} — {label} (Day {day})",
+                                  start + timedelta(days=day - 1))
+                        n += 1
+                    else:
+                        gc.delete(eid)
+            if notify or interactive:
+                self.after(0, lambda: messagebox.showinfo(
+                    "Google Calendar", f"Synced {n} milestone events.", parent=self))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _schedule_incubator(self):
+        """Schedule, edit, or remove an incubation. Enter only the Expected
+        Release date — the start and all milestones are back-calculated.
+        Selecting an already-scheduled incubator prefills its current date."""
+        from datetime import timedelta
+        rel_day = next((day for day, lbl, _ in self._INC_MILESTONES
+                        if lbl == "Expected Release"), 23)
+
+        incs = db.get_incubators(include_hidden=True)
+        if not incs:
+            messagebox.showinfo("Schedule", "Add an incubator first.", parent=self)
+            return
+        name_map  = {i["name"]: i["id"] for i in incs}
+        start_map = {i["id"]: (i.get("incubation_start") or "").strip() for i in incs}
+
+        win = ctk.CTkToplevel(self)
+        win.title("Schedule Incubator")
+        win.geometry("440x400")
+        win.grab_set()
+        _label(win, "Schedule Incubator", FONT_H, GOLD).pack(padx=16, pady=(14, 2))
+        _label(win, "Enter the Expected Release date. The start date and all\n"
+                    "milestones are calculated automatically. Pick an incubator\n"
+                    "that's already scheduled to edit or remove it.",
+               FONT_S, SUBTEXT).pack(padx=16)
+
+        frm = ctk.CTkFrame(win, fg_color="transparent")
+        frm.pack(fill="x", padx=24, pady=12)
+        frm.columnconfigure(1, weight=1)
+        _label(frm, "Incubator", FONT_S, SUBTEXT).grid(row=0, column=0, sticky="w", pady=6)
+        inc_cb = _combo(frm, list(name_map.keys()), 210)
+        inc_cb.grid(row=0, column=1, sticky="w", padx=8, pady=6)
+        _label(frm, "Expected Release", FONT_S, SUBTEXT).grid(row=1, column=0, sticky="w", pady=6)
+        date_e = ctk.CTkEntry(frm, placeholder_text="YYYY-MM-DD", width=210,
+                              fg_color=CARD2, border_color=BORDER, text_color=TEXT)
+        date_e.grid(row=1, column=1, sticky="w", padx=8, pady=6)
+
+        preview = _label(win, "", FONT_S, SUBTEXT)
+        preview.pack(padx=16, pady=(2, 4))
+
+        def _update_preview(*_):
+            d = _parse_date_loose(date_e.get())
+            if not d:
+                preview.configure(text="")
+                return
+            start = d - timedelta(days=rel_day - 1)
+            lines = [f"{lbl}:  {(start + timedelta(days=day - 1)).strftime('%b %d, %Y')}"
+                     for day, lbl, _ in self._INC_MILESTONES]
+            preview.configure(text="\n".join(lines), justify="left")
+
+        def _prefill(*_):
+            """When the selected incubator changes, fill in its current release date."""
+            iid = name_map.get(inc_cb.get())
+            raw = start_map.get(iid, "")
+            d = _parse_date_loose(raw) if raw and raw != "none" else None
+            date_e.delete(0, "end")
+            if d:
+                date_e.insert(0, (d + timedelta(days=rel_day - 1)).strftime("%Y-%m-%d"))
+            _update_preview()
+
+        date_e.bind("<KeyRelease>", _update_preview)
+        inc_cb.configure(command=lambda _v: _prefill())
+        inc_cb.set(incs[0]["name"])
+        _prefill()
+
+        def _save():
+            d = _parse_date_loose(date_e.get())
+            if not d:
+                messagebox.showerror("Schedule", "Enter a valid date (YYYY-MM-DD).", parent=win)
+                return
+            iid = name_map.get(inc_cb.get())
+            if not iid:
+                messagebox.showerror("Schedule", "Pick an incubator.", parent=win)
+                return
+            start = d - timedelta(days=rel_day - 1)
+            db.set_incubator_incubation_start(iid, start.isoformat())
+            self._cal_year, self._cal_month = d.year, d.month  # jump to release month
+            win.destroy()
+            self._refresh_timeline()
+            if self._gcal_enabled():
+                self._gcal_sync(interactive=False)
+
+        def _remove():
+            iid = name_map.get(inc_cb.get())
+            if not iid:
+                return
+            if not messagebox.askyesno("Remove schedule",
+                    f"Remove the incubation schedule for {inc_cb.get()}?", parent=win):
+                return
+            db.set_incubator_incubation_start(iid, "none")  # explicit cleared marker
+            win.destroy()
+            self._refresh_timeline()
+            if self._gcal_enabled():
+                self._gcal_sync(interactive=False)
+
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(pady=(8, 6))
+        _btn(btns, "Save Schedule", _save, fg=DK_GOLD, hover=GOLD,
+             text_color="black", width=150).pack(side="left", padx=4)
+        _btn(btns, "Remove", _remove, fg=RED, hover="#991B1B",
+             text_color="white", width=100).pack(side="left", padx=4)
+        _btn(btns, "Cancel", win.destroy, fg=CARD2, hover=BORDER, width=90).pack(side="left", padx=4)
 
     # ══════════════════════════════════════════════════════════════════════════
     #  SETTINGS VIEW
@@ -1874,6 +2608,39 @@ class IncubationApp(ctk.CTk):
              text_color="white", width=150).grid(row=1, column=1, sticky="w", padx=4, pady=4)
         self._govee_status_lbl = _label(gf, "", FONT_S, SUBTEXT)
         self._govee_status_lbl.grid(row=2, column=1, sticky="w", padx=4, pady=2)
+
+        # Sensibo (manual AC control)
+        sf = section("Sensibo API (AC Control)")
+        _label(sf, "Used for manual AC on/off and target temperature buttons.\n"
+                    "Set a per-incubator Sensibo Device ID in each incubator's setup.",
+               FONT_S, SUBTEXT).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 6))
+        r1 = _FormRow(sf, 1, "API Key", "Paste Sensibo API key here", 360)
+        self._set["sensibo_api_key"] = r1
+        _btn(sf, "Test Connection", self._test_sensibo, fg=BLUE, hover="#1D4ED8",
+             text_color="white", width=150).grid(row=2, column=1, sticky="w", padx=4, pady=4)
+        self._sensibo_status_lbl = _label(sf, "", FONT_S, SUBTEXT)
+        self._sensibo_status_lbl.grid(row=3, column=1, sticky="w", padx=4, pady=2)
+
+        # Google Calendar Sync
+        gcf = section("Google Calendar Sync")
+        _label(gcf, "Auto-push the incubation Calendar to Google Calendar.\n"
+                    "Needs a one-time Google Cloud OAuth credentials file (Desktop app).",
+               FONT_S, SUBTEXT).grid(row=0, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 6))
+        self._set["gcal_credentials_path"] = _FormRow(gcf, 1, "Credentials JSON", "path to client_secret.json", 320)
+        _btn(gcf, "Browse", self._browse_gcal_creds, width=80, height=28,
+             fg=BORDER, hover=CARD2).grid(row=1, column=2, padx=4, pady=4)
+        self._set["gcal_calendar_id"] = _FormRow(gcf, 2, "Calendar ID", "primary", 320)
+        self._set["gcal_enabled"] = _FormRow(gcf, 3, "Auto-sync on changes (1=yes, 0=no)", "0", 60)
+        gc_btns = ctk.CTkFrame(gcf, fg_color="transparent")
+        gc_btns.grid(row=4, column=0, columnspan=3, sticky="w", padx=4, pady=(6, 2))
+        _btn(gc_btns, "Install Libraries", self._install_gcal_libs,
+             fg=BORDER, hover=CARD2, width=150).pack(side="left", padx=(0, 6))
+        _btn(gc_btns, "Connect / Authorize", self._gcal_connect,
+             fg=GREEN, hover="#15803D", text_color="white", width=170).pack(side="left", padx=(0, 6))
+        _btn(gc_btns, "Sync Now", lambda: self._gcal_sync(notify=True),
+             fg=BLUE, hover="#1D4ED8", text_color="white", width=110).pack(side="left")
+        self._gcal_status_lbl = _label(gcf, "", FONT_S, SUBTEXT)
+        self._gcal_status_lbl.grid(row=5, column=0, columnspan=3, sticky="w", padx=4, pady=2)
 
         # Background Poller
         bf = section("Background Poller")
@@ -2032,11 +2799,12 @@ class IncubationApp(ctk.CTk):
         return frame
 
     def _refresh_settings(self):
-        keys = ["govee_api_key", "date_alert_lookahead",
+        keys = ["govee_api_key", "sensibo_api_key", "date_alert_lookahead",
                 "temp_unit", "lbs_per_gal", "target_gals_per_tray",
                 "qr_server_port", "qr_server_enabled", "mobile_passcode",
                 "smtp_host", "smtp_port", "smtp_tls",
-                "smtp_username", "smtp_password", "smtp_from"]
+                "smtp_username", "smtp_password", "smtp_from",
+                "gcal_credentials_path", "gcal_calendar_id", "gcal_enabled"]
         for k in keys:
             if k in self._set:
                 self._set[k].set(db.get_setting(k))
@@ -2054,11 +2822,12 @@ class IncubationApp(ctk.CTk):
             _he.delete(0, "end"); _he.insert(0, "" if _gh is None else f"{_gh:g}")
 
     def _save_settings(self):
-        keys = ["govee_api_key", "date_alert_lookahead",
+        keys = ["govee_api_key", "sensibo_api_key", "date_alert_lookahead",
                 "temp_unit", "lbs_per_gal", "target_gals_per_tray",
                 "qr_server_port", "qr_server_enabled", "mobile_passcode",
                 "smtp_host", "smtp_port", "smtp_tls",
-                "smtp_username", "smtp_password", "smtp_from"]
+                "smtp_username", "smtp_password", "smtp_from",
+                "gcal_credentials_path", "gcal_calendar_id", "gcal_enabled"]
         for k in keys:
             if k in self._set:
                 db.set_setting(k, self._set[k].get())
@@ -2068,8 +2837,9 @@ class IncubationApp(ctk.CTk):
         # Per-mode temperature/humidity goals
         for _mk, (_te, _he) in getattr(self, "_goal_entries", {}).items():
             db.set_mode_goals(_mk, _te.get().strip(), _he.get().strip())
-        # Update govee key live
+        # Update govee/sensibo keys live
         self._govee.set_api_key(db.get_setting("govee_api_key"))
+        self._sensibo.set_api_key(db.get_setting("sensibo_api_key"))
         messagebox.showinfo("Settings", "Settings saved.", parent=self)
 
     # ── Data storage helpers ──────────────────────────────────────────────────
@@ -2371,6 +3141,111 @@ class IncubationApp(ctk.CTk):
         _btn(win, "Close", win.destroy, width=100,
              fg=CARD2, hover=BORDER).pack(pady=10)
 
+    def _browse_gcal_creds(self):
+        path = filedialog.askopenfilename(
+            title="Select Google OAuth credentials JSON",
+            filetypes=[("JSON file", "*.json")])
+        if path:
+            self._set["gcal_credentials_path"].set(path)
+
+    def _install_gcal_libs(self):
+        self._gcal_status_lbl.configure(text="Installing libraries…", text_color=SUBTEXT)
+        self.update()
+
+        def _work():
+            try:
+                proc = subprocess.run(
+                    [sys.executable, "-m", "pip", "install",
+                     "google-api-python-client", "google-auth-oauthlib",
+                     "google-auth-httplib2"],
+                    capture_output=True, text=True,
+                    creationflags=_NO_WINDOW)
+                ok = proc.returncode == 0
+                msg = ("Libraries installed. Restart, then click Connect."
+                       if ok else f"Install failed:\n{proc.stderr[-300:]}")
+            except Exception as exc:
+                ok, msg = False, f"Install error: {exc}"
+            self.after(0, lambda: self._gcal_status_lbl.configure(
+                text=msg, text_color=(GREEN if ok else RED)))
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _gcal_connect(self):
+        # Persist the path/calendar so the sync uses the latest values
+        db.set_setting("gcal_credentials_path", self._set["gcal_credentials_path"].get())
+        db.set_setting("gcal_calendar_id", self._set["gcal_calendar_id"].get() or "primary")
+        if not gcal_sync.available():
+            self._gcal_status_lbl.configure(
+                text="Install libraries first, then restart.", text_color=ORANGE)
+            return
+        self._gcal_status_lbl.configure(
+            text="Opening browser for authorization…", text_color=SUBTEXT)
+        self._gcal_sync(interactive=True, notify=True)
+
+    def _test_sensibo(self):
+        key = self._set["sensibo_api_key"].get()
+        if not key:
+            self._sensibo_status_lbl.configure(text="Enter an API key first.", text_color=ORANGE)
+            return
+        self._sensibo_status_lbl.configure(text="Connecting…", text_color=SUBTEXT)
+        self.update()
+
+        tmp     = sensibo_mod.SensiboClient(api_key=key)
+        devices = tmp.list_devices()
+
+        if not devices:
+            self._sensibo_status_lbl.configure(
+                text=f"Connection failed: {tmp.status_label()}", text_color=RED)
+            return
+
+        db.set_setting("sensibo_api_key", key)
+        self._sensibo.set_api_key(key)
+
+        self._sensibo_status_lbl.configure(
+            text=f"Connected — {len(devices)} AC pod(s). See device list below.",
+            text_color=GREEN)
+        self._show_sensibo_device_list(devices)
+
+    def _show_sensibo_device_list(self, devices: list):
+        """Popup listing every Sensibo pod with a copy-ready Device ID."""
+        win = ctk.CTkToplevel(self)
+        win.title("Sensibo Devices Found")
+        win.geometry("560x420")
+        win.grab_set()
+
+        _label(win, "Sensibo Devices", FONT_H, GOLD).pack(padx=16, pady=(14, 2), anchor="w")
+        _label(win, "Copy the Device ID into each Incubator's setup.",
+               FONT_S, SUBTEXT).pack(padx=16, anchor="w")
+
+        scroll = ctk.CTkScrollableFrame(win, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=12, pady=8)
+
+        def _copy(text, btn):
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            orig = btn.cget("text")
+            btn.configure(text="Copied!")
+            self.after(1500, lambda b=btn, t=orig: b.configure(text=t))
+
+        for d in devices:
+            dev_id = d.get("id", "")
+            room   = (d.get("room") or {}).get("name", "Unnamed")
+            row = ctk.CTkFrame(scroll, fg_color=CARD2, corner_radius=8)
+            row.pack(fill="x", pady=3, padx=4)
+            left = ctk.CTkFrame(row, fg_color="transparent")
+            left.pack(side="left", fill="both", expand=True, padx=12, pady=8)
+            _label(left, room, FONT_B, GOLD).pack(anchor="w")
+            _label(left, f"Device ID:  {dev_id}", ("Courier New", 10), TEXT).pack(anchor="w")
+            btn_id = _btn(row, "Copy ID", None, width=82, height=26, fg=BORDER, hover=CARD)
+            btn_id.configure(command=lambda t=dev_id, b=btn_id: _copy(t, b))
+            btn_id.pack(side="right", padx=10, pady=8)
+
+        if not devices:
+            _label(scroll, "No Sensibo AC pods found on this account.",
+                   FONT_B, ORANGE).pack(anchor="w", padx=4, pady=6)
+
+        _btn(win, "Close", win.destroy, width=100,
+             fg=CARD2, hover=BORDER).pack(pady=10)
+
     # ══════════════════════════════════════════════════════════════════════════
     #  OPENERS
     # ══════════════════════════════════════════════════════════════════════════
@@ -2539,6 +3414,23 @@ class IncubationApp(ctk.CTk):
             fg_color=BORDER, hover_color=CARD2, text_color=TEXT,
             width=130, height=28, command=_toggle_alert,
         ).pack(side="left", pady=8)
+
+        # ── Sensibo AC manual controls (only when a device ID is configured) ──
+        if fresh.get("sensibo_device_id"):
+            _label(ctrl, "AC:", FONT_S, SUBTEXT).pack(side="left", padx=(20, 6), pady=8)
+            _dt_lbl, _dt_fg, _dt_tc = self._ac_toggle_style(fresh["sensibo_device_id"])
+            ctk.CTkButton(
+                ctrl, text=_dt_lbl, width=86, height=28, corner_radius=14,
+                fg_color=_dt_fg, hover_color=BORDER, text_color=_dt_tc,
+                font=("Segoe UI", 11, "bold"),
+                command=lambda i=fresh["id"], d=fresh["sensibo_device_id"]: self._sensibo_toggle_power(i, d),
+            ).pack(side="left", padx=2, pady=8)
+            _btn(ctrl, self._ac_temp_label(fresh["sensibo_device_id"]),
+                 lambda i=fresh["id"], d=fresh["sensibo_device_id"], n=fresh["name"]: self._sensibo_prompt_temp(i, d, n),
+                 width=92, height=28, fg=CARD2, hover=BORDER).pack(side="left", padx=2, pady=8)
+            _btn(ctrl, self._ac_fan_label(fresh["sensibo_device_id"]),
+                 lambda i=fresh["id"], d=fresh["sensibo_device_id"], n=fresh["name"]: self._sensibo_prompt_fan(i, d, n),
+                 width=92, height=28, fg=CARD2, hover=BORDER).pack(side="left", padx=2, pady=8)
 
         # ── Scrollable body ───────────────────────────────────────────────────
         body = ctk.CTkScrollableFrame(frame, fg_color="transparent", corner_radius=0)
@@ -3381,6 +4273,129 @@ class IncubationApp(ctk.CTk):
         self._sync_trays_to_mode(iid, key, prev)
         self._refresh_current()
 
+    def _sensibo_update_buttons(self, iid: int, device_id: str):
+        """Patch just the AC button labels/colors on the card for this incubator."""
+        widgets = self._card_widgets.get(iid, {})
+        pwr = widgets.get("ac_power")
+        tmp = widgets.get("ac_temp")
+        fan = widgets.get("ac_fan")
+        if pwr and pwr.winfo_exists():
+            lbl, fg, tc = self._ac_toggle_style(device_id)
+            pwr.configure(text=lbl, fg_color=fg, text_color=tc)
+        if tmp and tmp.winfo_exists():
+            tmp.configure(text=self._ac_temp_label(device_id))
+        if fan and fan.winfo_exists():
+            fan.configure(text=self._ac_fan_label(device_id))
+
+    def _sensibo_run(self, iid: int, device_id: str, fn, on_error=None):
+        """Run fn() in a background thread; patch AC buttons when done.
+
+        fn must be a zero-argument callable (use a lambda to capture kwargs).
+        """
+        import threading
+        widgets = self._card_widgets.get(iid, {})
+        for key in ("ac_power", "ac_temp", "ac_fan"):
+            w = widgets.get(key)
+            if w and w.winfo_exists():
+                w.configure(state="disabled")
+
+        def _work():
+            ok = fn()
+            def _done():
+                for key in ("ac_power", "ac_temp", "ac_fan"):
+                    w = widgets.get(key)
+                    if w and w.winfo_exists():
+                        w.configure(state="normal")
+                if not ok and on_error:
+                    messagebox.showerror("Sensibo", on_error(), parent=self)
+                self._sensibo_update_buttons(iid, device_id)
+            self.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _sensibo_set_power(self, iid: int, device_id: str, on: bool):
+        if not db.get_setting("sensibo_api_key"):
+            messagebox.showwarning("Sensibo", "Set a Sensibo API key in Settings first.", parent=self)
+            return
+        self._sensibo_run(iid, device_id,
+            lambda: self._sensibo.set_ac_state_many(device_id, on=on),
+            on_error=lambda: f"Could not reach the AC unit(s):\n{self._sensibo.status_label()}")
+
+    def _sensibo_toggle_power(self, iid: int, device_id: str):
+        if not db.get_setting("sensibo_api_key"):
+            messagebox.showwarning("Sensibo", "Set a Sensibo API key in Settings first.", parent=self)
+            return
+        target = not self._sensibo.resolve_power(device_id)
+        self._sensibo_run(iid, device_id,
+            lambda: self._sensibo.set_ac_state_many(device_id, on=target),
+            on_error=lambda: f"Could not reach the AC unit(s):\n{self._sensibo.status_label()}")
+
+    def _ac_toggle_style(self, device_id: str):
+        """Return (label, fg, text_color) for an AC power toggle button."""
+        power = self._sensibo.get_cached_power(device_id)
+        if power is True:
+            return "● On", "#1C3A1C", GREEN
+        if power is False:
+            return "● Off", "#3A1C1C", "#EF4444"
+        return "⏻ Power", CARD2, TEXT
+
+    def _ac_temp_label(self, device_id: str) -> str:
+        st = self._sensibo.get_cached_state(device_id)
+        t = st.get("targetTemperature")
+        return f"{t}°F" if t is not None else "Set Temp"
+
+    def _ac_fan_label(self, device_id: str) -> str:
+        st = self._sensibo.get_cached_state(device_id)
+        f = st.get("fanLevel")
+        return f.capitalize() if f else "Fan"
+
+    def _sensibo_prompt_temp(self, iid: int, device_id: str, name: str):
+        if not db.get_setting("sensibo_api_key"):
+            messagebox.showwarning("Sensibo", "Set a Sensibo API key in Settings first.", parent=self)
+            return
+        lo, hi = sensibo_mod.MIN_TEMP_F, sensibo_mod.MAX_TEMP_F
+        dlg = ctk.CTkInputDialog(
+            title="Set AC Target Temp",
+            text=f"Target temperature (°F) for {name}.\n\n"
+                 f"Minimum {lo}°F · Maximum {hi}°F")
+        raw = dlg.get_input()
+        if raw is None or not raw.strip():
+            return
+        try:
+            temp_f = int(round(float(raw.strip())))
+        except ValueError:
+            messagebox.showerror("Sensibo", "Enter a numeric temperature.", parent=self)
+            return
+        if not (lo <= temp_f <= hi):
+            messagebox.showerror("Sensibo",
+                f"Temperature must be between {lo}°F and {hi}°F.", parent=self)
+            return
+        self._sensibo_run(iid, device_id,
+            lambda: self._sensibo.set_ac_state_many(device_id, on=True, target_temp=temp_f),
+            on_error=lambda: f"Could not reach the AC unit(s):\n{self._sensibo.status_label()}")
+
+    def _sensibo_prompt_fan(self, iid: int, device_id: str, name: str):
+        if not db.get_setting("sensibo_api_key"):
+            messagebox.showwarning("Sensibo", "Set a Sensibo API key in Settings first.", parent=self)
+            return
+        win = ctk.CTkToplevel(self)
+        win.title("Set Fan Speed")
+        win.geometry("260x320")
+        win.grab_set()
+        _label(win, f"Fan speed — {name}", FONT_B, GOLD).pack(padx=16, pady=(14, 8))
+
+        def _apply(level):
+            win.destroy()
+            self._sensibo_run(iid, device_id,
+                lambda l=level: self._sensibo.set_ac_state_many(device_id, fan_level=l),
+                on_error=lambda: f"Could not set fan speed:\n{self._sensibo.status_label()}")
+
+        for lvl in sensibo_mod.FAN_LEVELS:
+            _btn(win, lvl.capitalize(), lambda l=lvl: _apply(l),
+                 width=180, height=32, fg=BORDER, hover=CARD2).pack(pady=3)
+        _btn(win, "Cancel", win.destroy, width=180, height=28,
+             fg=CARD2, hover=BORDER).pack(pady=(8, 4))
+
     def _after_inspection_saved(self):
         """After saving an inspection, jump back to the dashboard."""
         self.show_view("dashboard")
@@ -3508,6 +4523,7 @@ class IncubationApp(ctk.CTk):
         "total kg for 2gal":    "kg_per_2gal",
         "total lbs for 2gal":   "lbs_per_2gal",
         "total trays":          "total_trays",
+        "expected trays":       "total_trays",
         "incubator space":      "incubator_space",
         "notes":                "notes",
     }
@@ -3977,6 +4993,55 @@ class IncubationApp(ctk.CTk):
             text_color=SUBTEXT,
         )
         self.after(30_000, self._tick)  # refresh every 30s
+
+    # ── Live code reload ────────────────────────────────────────────────────────
+
+    def _restart_app(self):
+        """Relaunch the app so code edits take effect without a manual
+        close/reopen. Launches a fresh instance, then closes this one."""
+        import subprocess
+        try:
+            subprocess.Popen([sys.executable] + sys.argv)
+        except Exception as exc:
+            messagebox.showerror("Reload", f"Could not restart:\n{exc}", parent=self)
+            return
+        self.destroy()
+        os._exit(0)   # ensure the in-process QR server thread doesn't linger
+
+    def _start_code_watcher(self):
+        """Watch this folder's .py files; when any changes, reveal the Reload
+        button so a single click loads the new code (no close/reopen needed)."""
+        import threading
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+
+        def _snapshot():
+            stamps = {}
+            for fn in os.listdir(app_dir):
+                if fn.endswith(".py"):
+                    try:
+                        stamps[fn] = os.path.getmtime(os.path.join(app_dir, fn))
+                    except OSError:
+                        pass
+            return stamps
+
+        baseline = _snapshot()
+
+        def _watch():
+            import time
+            while True:
+                time.sleep(2)
+                try:
+                    if _snapshot() != baseline:
+                        self.after(0, self._show_reload_btn)
+                        return  # stop watching once an update is flagged
+                except Exception:
+                    pass
+
+        threading.Thread(target=_watch, daemon=True).start()
+
+    def _show_reload_btn(self):
+        if hasattr(self, "_reload_btn") and not self._reload_btn.winfo_ismapped():
+            self._reload_btn.pack(side="right", padx=8, pady=3)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
