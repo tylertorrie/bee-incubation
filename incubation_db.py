@@ -594,6 +594,7 @@ def get_trays(incubator_id: int = None, sample_id: int = None,
         q = """SELECT t.*,
                       s.name AS sample_name,
                       s.live_bees_per_lb AS sample_live_per_lb,
+                      s.chalkbrood AS sample_chalkbrood,
                       i.name AS incubator_name,
                       b.name AS batch_name
                FROM trays t

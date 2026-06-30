@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.12.2"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.12.3"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -1614,9 +1614,9 @@ class IncubationApp(ctk.CTk):
         self._cooldown_lbl = _label(fbar, "", FONT_S, TEAL)
         self._cooldown_lbl.pack(side="right", padx=12, pady=6)
 
-        cols = ("Tray #", "Sample", "Live Bees/Lb", "Incubator", "Batch",
-                "Weight (lbs)", "Volume (gal)", "Live Count",
-                "Parasite %", "In Date", "Out Date", "Cool Days", "Status")
+        cols = ("Tray #", "Sample", "Incubator", "Weight (Kg)", "Live Count",
+                "Parasite %", "Chalkbrood %", "Start Date", "Release Date",
+                "Cool Days", "Status")
         self._tray_tree = self._make_tree(frame, cols)
         self._tray_tree.pack(fill="both", expand=True, padx=12, pady=4)
         self._tray_tree.bind("<Double-1>", self._on_tray_double_click)
@@ -1638,9 +1638,9 @@ class IncubationApp(ctk.CTk):
             self._tray_sort_asc = True
 
         # Update heading arrows
-        cols = ("Tray #", "Sample", "Live Bees/Lb", "Incubator", "Batch",
-                "Weight (lbs)", "Volume (gal)", "Live Count",
-                "Parasite %", "In Date", "Out Date", "Cool Days", "Status")
+        cols = ("Tray #", "Sample", "Incubator", "Weight (Kg)", "Live Count",
+                "Parasite %", "Chalkbrood %", "Start Date", "Release Date",
+                "Cool Days", "Status")
         for ci, col in enumerate(cols):
             arrow = (" ↑" if self._tray_sort_asc else " ↓") if ci == col_idx else ""
             tree.heading(col, text=col + arrow,
@@ -1665,9 +1665,9 @@ class IncubationApp(ctk.CTk):
         # Reset sort state on refresh
         self._tray_sort_col = None
         self._tray_sort_asc = True
-        cols = ("Tray #", "Sample", "Live Bees/Lb", "Incubator", "Batch",
-                "Weight (lbs)", "Volume (gal)", "Live Count",
-                "Parasite %", "In Date", "Out Date", "Cool Days", "Status")
+        cols = ("Tray #", "Sample", "Incubator", "Weight (Kg)", "Live Count",
+                "Parasite %", "Chalkbrood %", "Start Date", "Release Date",
+                "Cool Days", "Status")
         for col in cols:
             tree.heading(col, text=col,
                 command=lambda c=cols.index(col): self._sort_tray_tree(c))
@@ -1682,13 +1682,11 @@ class IncubationApp(ctk.CTk):
             (str(t["id"]), (
                 t["tray_number"],
                 t.get("sample_name") or "—",
-                f"{t['sample_live_per_lb']:,.0f}" if t.get("sample_live_per_lb") else "—",
                 t.get("incubator_name") or "—",
-                t.get("batch_name") or "—",
-                f"{t['weight_lbs']:.2f}" if t.get("weight_lbs") else "—",
-                f"{t['volume_gal']:.2f}" if t.get("volume_gal") else "—",
+                f"{t['weight_lbs'] * 0.45359237:.2f}" if t.get("weight_lbs") else "—",
                 t.get("live_count") or "—",
                 f"{t['parasite_level_pct']:.1f}%" if t.get("parasite_level_pct") else "—",
+                f"{t['sample_chalkbrood']:.1f}%" if t.get("sample_chalkbrood") else "—",
                 t.get("in_date") or "—",
                 t.get("out_date") or "—",
                 (lambda d: f"{d}d" if d is not None else "—")(cool_down_days(t)),
