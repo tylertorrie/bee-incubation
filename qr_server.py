@@ -209,9 +209,14 @@ def _sample_detail_rows(sample) -> list:
         if isinstance(lbs_val, (int, float)):
             return f"{lbs_val * 0.45359237:,.{dec}f}"
         return None
+    def per_kg(per_lb_val, per_kg_val, dec=0):
+        if isinstance(per_kg_val, (int, float)):
+            return f"{per_kg_val:,.{dec}f}"
+        if isinstance(per_lb_val, (int, float)):
+            return f"{per_lb_val / 0.45359237:,.{dec}f}"
+        return None
     candidates = [
-        ("Live bees / lb",   num(sample.get("live_bees_per_lb"))),
-        ("Live bees / kg",   num(sample.get("live_bees_per_kg"))),
+        ("Live bees / kg",   per_kg(sample.get("live_bees_per_lb"), sample.get("live_bees_per_kg"))),
         ("Total kg",         kg(sample.get("total_weight_lbs"), sample.get("total_weight_kg"), 1)),
         ("Total gal bees",   num(sample.get("total_volume_gal"), 1)),
         ("Parasites",        num(sample.get("parasites"), 1)),
@@ -1383,8 +1388,11 @@ def _samples_list_body() -> str:
     ]
     if samples:
         for s in samples:
-            lpl = s.get("live_bees_per_lb")
-            lpl_txt = f"{lpl:,.0f}/lb" if isinstance(lpl, (int, float)) else "—"
+            lpk = s.get("live_bees_per_kg")
+            if not isinstance(lpk, (int, float)):
+                lpl = s.get("live_bees_per_lb")
+                lpk = lpl / 0.45359237 if isinstance(lpl, (int, float)) else None
+            lpl_txt = f"{lpk:,.0f}/kg" if isinstance(lpk, (int, float)) else "—"
             ntrays = counts.get(s["id"], 0)
             key = str(s["name"]).lower().replace('"', "")
             parts.append(
@@ -1609,10 +1617,12 @@ def _incubator_trays_body(inc_id: int) -> str:
         for t in trays:
             tn   = t.get("tray_number") or "—"
             sm   = t.get("sample_name") or "—"
-            lplb = t.get("sample_live_per_lb")
+            lpk  = t.get("sample_live_per_kg")
+            if lpk is None and t.get("sample_live_per_lb") is not None:
+                lpk = t["sample_live_per_lb"] / 0.45359237
             vol  = t.get("volume_gal")
             vtxt = f"{vol:.1f} gal" if vol is not None else "—"
-            lplb_txt = f"{lplb:,.0f}/lb" if lplb is not None else ""
+            lplb_txt = f"{lpk:,.0f}/kg" if lpk is not None else ""
             sub  = sm + (f" · {lplb_txt}" if lplb_txt else "")
             key  = (str(tn) + " " + str(sm)).lower().replace('"', "")
             parts.append(

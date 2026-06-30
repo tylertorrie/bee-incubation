@@ -594,6 +594,7 @@ def get_trays(incubator_id: int = None, sample_id: int = None,
         q = """SELECT t.*,
                       s.name AS sample_name,
                       s.live_bees_per_lb AS sample_live_per_lb,
+                      s.live_bees_per_kg AS sample_live_per_kg,
                       s.chalkbrood AS sample_chalkbrood,
                       i.name AS incubator_name,
                       b.name AS batch_name
@@ -687,6 +688,7 @@ def find_trays(query: str, limit: int = 25) -> list:
     sql = f"""
         SELECT t.*, s.name AS sample_name,
                s.live_bees_per_lb AS sample_live_per_lb,
+               s.live_bees_per_kg AS sample_live_per_kg,
                i.name AS incubator_name
         FROM trays t
         LEFT JOIN samples    s ON t.sample_id    = s.id

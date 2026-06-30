@@ -63,7 +63,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.12.4"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.12.5"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -531,10 +531,10 @@ class SampleDialog(ctk.CTkToplevel):
 
         fields = [
             ("Sample Name *",       "name",              "e.g. RR-4"),
-            ("Total Pounds",        "total_weight_lbs",  ""),
             ("Total Kgs",           "total_weight_kg",   ""),
-            ("Live Bees per Pound", "live_bees_per_lb",  ""),
+            ("Total Pounds",        "total_weight_lbs",  ""),
             ("Live Bees per KG",    "live_bees_per_kg",  ""),
+            ("Live Bees per Pound", "live_bees_per_lb",  ""),
             ("Parasites",           "parasites",         ""),
             ("Chalkbrood",          "chalkbrood",        ""),
             ("Total Gal Bees",      "total_volume_gal",  ""),
@@ -1522,7 +1522,7 @@ class IncubationApp(ctk.CTk):
         _btn(hdr, "+ Add Sample", lambda: self._open_sample_dialog(),
              fg=CARD, hover=CARD2, width=130).pack(side="right", padx=6)
 
-        cols = ("Name", "Total Kg", "Live Bees/Lb", "Parasites", "Chalkbrood",
+        cols = ("Name", "Total Kg", "Live Bees/Kg", "Parasites", "Chalkbrood",
                 "Total Gal", "Kg for 2gal", "Total Trays", "Inc. Space", "Notes")
         self._smp_tree = self._make_tree(frame, cols)
         self._smp_tree.pack(fill="both", expand=True, padx=12, pady=4)
@@ -1543,11 +1543,18 @@ class IncubationApp(ctk.CTk):
                 return f"{lbs_val * 0.45359237:,.{dec}f}"
             return "—"
 
+        def _per_kg(per_lb_val, per_kg_val, dec=0):
+            if isinstance(per_kg_val, (int, float)):
+                return f"{per_kg_val:,.{dec}f}"
+            if isinstance(per_lb_val, (int, float)):
+                return f"{per_lb_val / 0.45359237:,.{dec}f}"
+            return "—"
+
         for s in db.get_samples():
             tree.insert("", "end", iid=str(s["id"]), values=(
                 s["name"],
                 _kg(s.get("total_weight_lbs"), s.get("total_weight_kg")),
-                _n(s.get("live_bees_per_lb"), 0),
+                _per_kg(s.get("live_bees_per_lb"), s.get("live_bees_per_kg")),
                 _n(s.get("parasites")),
                 _n(s.get("chalkbrood")),
                 _n(s.get("total_volume_gal")),
