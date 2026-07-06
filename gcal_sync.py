@@ -82,7 +82,13 @@ class GoogleCalendar:
         try:
             from google_auth_oauthlib.flow import InstalledAppFlow
             flow = InstalledAppFlow.from_client_secrets_file(self.creds_file, SCOPES)
-            creds = flow.run_local_server(port=0)
+            # Bind to 127.0.0.1 (IPv4) explicitly. Using the name "localhost"
+            # lets the browser resolve it to IPv6 (::1) on Windows while the
+            # callback server listens on IPv4 → "localhost refused to connect".
+            creds = flow.run_local_server(
+                host="127.0.0.1", port=0, open_browser=True,
+                authorization_prompt_message="",
+                success_message="Authorized. You can close this tab and return to the app.")
             self._save_token(creds)
             self._creds = creds
             return True

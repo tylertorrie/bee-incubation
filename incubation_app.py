@@ -66,7 +66,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.25.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.32.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -75,7 +75,8 @@ def _git_revision() -> str:
         app_dir = os.path.dirname(os.path.abspath(__file__))
         out = subprocess.run(
             ["git", "-C", app_dir, "log", "-1", "--format=%h · %cd", "--date=short"],
-            capture_output=True, text=True, timeout=5, creationflags=_NO_WINDOW,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5, creationflags=_NO_WINDOW,
         )
         return out.stdout.strip() if out.returncode == 0 else ""
     except Exception:
@@ -98,33 +99,50 @@ ctk.set_default_color_theme("blue")
 GOLD      = "#FFD700"
 DK_GOLD   = "#B8860B"
 GREEN     = "#4CAF50"
+GREEN_LT  = "#7CE08A"
 TEAL      = "#10B981"
 ORANGE    = "#FF9800"
-RED       = "#F44336"
+RED       = "#FF3B30"
+RED_LT    = "#FF6A57"
 BLUE      = "#3B82F6"
+LINK      = "#93C5FD"
+BG        = "#0F172A"   # app background
+BARBG     = "#0B1220"   # title / status bar
 SIDEBAR   = "#111827"
-CARD      = "#1F2937"
-CARD2     = "#263347"
-BORDER    = "#374151"
+RIGHTPANE = "#0D1524"
+CARD      = "#1B2536"   # incubator cards
+PANEL     = "#151E2E"   # section / table panels
+NESTED    = "#141C2B"   # nested rows
+CARD2     = "#202B3D"   # inset tiles / inputs
+BORDER    = "#374151"   # strong border
+BORDER2   = "#232F42"   # subtle border
+SUBBORDER = "#1E293B"   # faint divider
 TEXT      = "#F3F4F6"
+TEXT2     = "#CBD5E1"
 SUBTEXT   = "#9CA3AF"
+FAINT     = "#6B7280"
 FONT_H    = ("Segoe UI", 14, "bold")
 FONT_B    = ("Segoe UI", 11)
 FONT_S    = ("Segoe UI", 10)
 
 
 def _treeview_style():
+    """Table style per the design handoff: panel background #151E2E, gold
+    bold headers with a subtle divider, 11.5px body text, roomy rows."""
     style = ttk.Style()
     style.theme_use("default")
     style.configure("Dark.Treeview",
-        background=CARD, foreground=TEXT,
-        fieldbackground=CARD, borderwidth=0,
-        rowheight=26, font=("Segoe UI", 10))
+        background=PANEL, foreground="#E5E7EB",
+        fieldbackground=PANEL, borderwidth=0,
+        rowheight=30, font=("Segoe UI", 11))
     style.configure("Dark.Treeview.Heading",
-        background=SIDEBAR, foreground=GOLD,
-        relief="flat", font=("Segoe UI", 10, "bold"))
+        background=PANEL, foreground=GOLD,
+        relief="flat", borderwidth=0, padding=(10, 8),
+        font=("Segoe UI", 11, "bold"))
+    style.map("Dark.Treeview.Heading",
+        background=[("active", PANEL)])
     style.map("Dark.Treeview",
-        background=[("selected", "#3B4F6B")],
+        background=[("selected", "#26374F")],
         foreground=[("selected", TEXT)])
 
 
@@ -137,6 +155,22 @@ def _btn(parent, text, cmd, width=110, height=32, fg=CARD2, hover=BORDER,
     return ctk.CTkButton(parent, text=text, command=cmd, width=width,
                          height=height, fg_color=fg, hover_color=hover,
                          text_color=text_color, corner_radius=6, **kw)
+
+
+def _btn_primary(parent, text, cmd, width=130):
+    """Gold primary action button (spec: #E0A81A→#B8860B, text #1A1206)."""
+    return ctk.CTkButton(parent, text=text, command=cmd, width=width, height=34,
+                         corner_radius=8, fg_color="#C79114", hover_color="#E0A81A",
+                         text_color="#1A1206", font=("Segoe UI", 12, "bold"),
+                         border_width=1, border_color=DK_GOLD)
+
+
+def _btn_secondary(parent, text, cmd, width=120):
+    """Neutral secondary action button (spec: #1F2937 bg, #374151 border)."""
+    return ctk.CTkButton(parent, text=text, command=cmd, width=width, height=34,
+                         corner_radius=8, fg_color="#1F2937", hover_color="#28374D",
+                         text_color="#E5E7EB", font=("Segoe UI", 12),
+                         border_width=1, border_color=BORDER)
 
 
 def _parse_date_loose(s):
@@ -207,7 +241,28 @@ def _poll_age(timestamp_iso: str | None, interval_sec: int = 300) -> tuple[str, 
 
 def _entry(parent, placeholder="", width=200):
     return ctk.CTkEntry(parent, placeholder_text=placeholder, width=width,
-                        fg_color=CARD, border_color=BORDER, text_color=TEXT)
+                        fg_color=CARD2, border_color=BORDER, text_color="#CBD5E1",
+                        corner_radius=7)
+
+
+def _mix(fg: str, bg: str, alpha: float) -> str:
+    """Blend fg over bg at the given alpha (0-1) → solid hex.
+    Used to fake the translucent badge fills from the design spec."""
+    fg = fg.lstrip("#"); bg = bg.lstrip("#")
+    fr, fgc, fb = int(fg[0:2], 16), int(fg[2:4], 16), int(fg[4:6], 16)
+    br, bgc, bb = int(bg[0:2], 16), int(bg[2:4], 16), int(bg[4:6], 16)
+    r = round(fr * alpha + br * (1 - alpha))
+    g = round(fgc * alpha + bgc * (1 - alpha))
+    b = round(fb * alpha + bb * (1 - alpha))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+# Operating-mode accent colors (badges + segmented controls)
+MODE_COLORS = {"off": "#6B7280", "cool_storage": TEAL,
+               "incubation": BLUE, "holding": GOLD}
+# Spec-exact pre-blended badge fills (mode color at ~13% over card #1B2536)
+MODE_BADGE_BG = {"off": "#252B34", "cool_storage": "#1B2E33",
+                 "incubation": "#20293B", "holding": "#31311F"}
 
 
 def _combo(parent, values, width=200):
@@ -257,7 +312,7 @@ class _FormRow:
 
 class IncubatorDialog(ctk.CTkToplevel):
     def __init__(self, master, inc: dict = None, on_save=None, on_delete=None):
-        super().__init__(master)
+        super().__init__(master, fg_color=BG)
         self.on_save = on_save
         self.on_delete = on_delete
         self.inc = inc or {}
@@ -403,7 +458,7 @@ class BatchDialog(ctk.CTkToplevel):
 
     def __init__(self, master, batch: dict = None,
                  incubator_id: int = None, on_save=None):
-        super().__init__(master)
+        super().__init__(master, fg_color=BG)
         self.on_save = on_save
         self.batch = batch or {}
         self.preselect_inc = incubator_id
@@ -518,7 +573,7 @@ class BatchDialog(ctk.CTkToplevel):
 
 class SampleDialog(ctk.CTkToplevel):
     def __init__(self, master, sample: dict = None, on_save=None):
-        super().__init__(master)
+        super().__init__(master, fg_color=BG)
         self.on_save = on_save
         self.sample = sample or {}
         self.title("Edit Sample" if sample else "Add Sample")
@@ -618,7 +673,7 @@ class SampleDialog(ctk.CTkToplevel):
 class TrayDialog(ctk.CTkToplevel):
     def __init__(self, master, tray: dict = None,
                  incubator_id: int = None, on_save=None):
-        super().__init__(master)
+        super().__init__(master, fg_color=BG)
         self.on_save = on_save
         self.tray = tray or {}
         self.preselect_inc = incubator_id
@@ -770,7 +825,7 @@ class TrayDialog(ctk.CTkToplevel):
 
 class QRDialog(ctk.CTkToplevel):
     def __init__(self, master, tray: dict, port: int = 5151):
-        super().__init__(master)
+        super().__init__(master, fg_color=BG)
         self.title(f"QR Code — Tray {tray['tray_number']}")
         self.geometry("360x440")
         self.resizable(False, False)
@@ -805,7 +860,7 @@ class QRDialog(ctk.CTkToplevel):
 
 class AlertsDialog(ctk.CTkToplevel):
     def __init__(self, master, on_ack=None):
-        super().__init__(master)
+        super().__init__(master, fg_color=BG)
         self.on_ack = on_ack
         self.title("Active Alerts")
         self.geometry("580x480")
@@ -922,9 +977,10 @@ class IncubationApp(ctk.CTk):
         # QR server port
         self._qr_port = int(db.get_setting("qr_server_port", "5151"))
 
-        # Build UI — order matters for pack(): the sidebar (left) and the status
-        # bar (bottom, full width) must be reserved BEFORE the expanding main
-        # area, or _main won't claim the full remaining width (left a right gap).
+        # Build UI — order matters for pack(): the title bar (top) plus the
+        # sidebar (left) and the status bar (bottom, full width) must be
+        # reserved BEFORE the expanding main area.
+        self._build_titlebar()
         self._build_sidebar()
         self._build_status_bar()
         self._build_main()
@@ -955,6 +1011,10 @@ class IncubationApp(ctk.CTk):
         # Refresh status bar periodically
         self._tick()
 
+        # Pulsing alert dots on dashboard cards
+        self._pulse_on = True
+        self._pulse_dots()
+
         # Watch for code updates (incl. git auto-sync pulls) and offer 1-click reload
         self._start_code_watcher()
         self.bind_all("<F5>", lambda e: self._restart_app())
@@ -962,83 +1022,147 @@ class IncubationApp(ctk.CTk):
 
     # ── Layout ────────────────────────────────────────────────────────────────
 
+    def _load_icon(self, key: str, color: str, size: int = 18):
+        """Load a tinted nav icon PNG as a CTkImage (cached)."""
+        cache = getattr(self, "_icon_cache", None)
+        if cache is None:
+            cache = self._icon_cache = {}
+        ck = (key, color, size)
+        if ck in cache:
+            return cache[ck]
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "assets", "icons", f"{key}_{color}.png")
+        img = None
+        if os.path.exists(path):
+            try:
+                from PIL import Image as _PImg
+                raw = _PImg.open(path)
+                img = ctk.CTkImage(light_image=raw, dark_image=raw, size=(size, size))
+            except Exception:
+                img = None
+        cache[ck] = img
+        return img
+
+    def _build_titlebar(self):
+        """40px app title bar across the very top (spec: #0B1220 + hairline)."""
+        tb = ctk.CTkFrame(self, fg_color=BARBG, height=40, corner_radius=0)
+        tb.pack(side="top", fill="x")
+        tb.pack_propagate(False)
+        _label(tb, "🐝", ("Segoe UI", 13), "#F5B52B").pack(side="left", padx=(14, 6))
+        _label(tb, "Bee Incubation Manager", ("Segoe UI", 12, "bold"),
+               TEXT2).pack(side="left")
+        # Mock window-control circles (right)
+        for _ in range(3):
+            ctk.CTkLabel(tb, text="●", font=("Segoe UI", 11),
+                         text_color="#334155").pack(side="right", padx=(0, 6))
+        # bottom hairline
+        ctk.CTkFrame(self, fg_color=SUBBORDER, height=1, corner_radius=0).pack(
+            side="top", fill="x")
+
+    def _screen_header(self, parent, title: str, subtitle: str):
+        """Standard top bar: 20px gold title + muted subtitle, actions right.
+        Returns the header frame — callers pack action buttons side='right'."""
+        hdr = ctk.CTkFrame(parent, fg_color="transparent")
+        hdr.pack(fill="x", padx=26, pady=(20, 14))
+        left = ctk.CTkFrame(hdr, fg_color="transparent")
+        left.pack(side="left")
+        _label(left, title, ("Segoe UI", 20, "bold"), GOLD).pack(anchor="w")
+        _label(left, subtitle, ("Segoe UI", 11), FAINT).pack(anchor="w")
+        return hdr
+
     def _build_sidebar(self):
-        sb = ctk.CTkFrame(self, fg_color=SIDEBAR, width=190, corner_radius=0)
+        sb = ctk.CTkFrame(self, fg_color=SIDEBAR, width=208, corner_radius=0,
+                          border_width=0)
         sb.pack(side="left", fill="y")
         sb.pack_propagate(False)
 
-        # Logo image — show if logo.png exists, otherwise fall back to text
+        # Brand block — rounded tile containing the logo, centered
+        tile = ctk.CTkFrame(sb, fg_color=CARD, corner_radius=16, width=62, height=62)
+        tile.pack(pady=(22, 8))
+        tile.pack_propagate(False)
         _logo_png = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+        _placed = False
         if os.path.exists(_logo_png):
             try:
                 from PIL import Image as _PILImage
-                import customtkinter as _ctk2
                 _raw = _PILImage.open(_logo_png).convert("RGBA")
-                # Make white background transparent
                 _data = _raw.getdata()
                 _raw.putdata([(r, g, b, 0) if r > 230 and g > 230 and b > 230
                               else (r, g, b, a) for r, g, b, a in _data])
-                _ctk_img = ctk.CTkImage(light_image=_raw, dark_image=_raw, size=(54, 54))
-                ctk.CTkLabel(sb, image=_ctk_img, text="").pack(pady=(18, 2))
+                _ctk_img = ctk.CTkImage(light_image=_raw, dark_image=_raw, size=(38, 38))
+                ctk.CTkLabel(tile, image=_ctk_img, text="").pack(expand=True)
+                _placed = True
             except Exception:
-                _label(sb, "🐝", ("Segoe UI", 30), GOLD).pack(pady=(18, 2))
-        else:
-            _label(sb, "🐝", ("Segoe UI", 30), GOLD).pack(pady=(18, 2))
+                _placed = False
+        if not _placed:
+            _label(tile, "🐝", ("Segoe UI", 26), "#F5B52B").pack(expand=True)
 
-        _label(sb, "Incubation", ("Segoe UI", 13, "bold"), GOLD).pack(
-            pady=(0, 2), padx=16, anchor="center")
-        _label(sb, "Bee Manager", FONT_S, SUBTEXT).pack(
-            pady=(0, 2), padx=16, anchor="center")
-        _label(sb, app_version_string(), ("Segoe UI", 9), "#6B7280").pack(
-            pady=(0, 14), padx=16, anchor="center")
+        _label(sb, "Incubation", ("Segoe UI", 15, "bold"), GOLD).pack(anchor="center")
+        _label(sb, "Bee Manager", FONT_S, SUBTEXT).pack(anchor="center", pady=(1, 1))
+        _label(sb, app_version_string(), ("Segoe UI", 9), FAINT).pack(anchor="center")
+        ctk.CTkFrame(sb, fg_color=SUBBORDER, height=1).pack(fill="x", padx=14, pady=(12, 10))
 
         nav_items = [
-            ("🏠  Dashboard",     "dashboard"),
-            ("🌡️  Incubators",    "incubators"),
-            ("🧪  Samples",       "samples"),
-            ("📦  Trays",         "trays"),
-            ("📊  Analytics",     "analytics"),
-            ("📅  Calendar",      "timeline"),
-            ("🔍  Inspections",   "inspections"),
-            ("⚙️  Settings",      "settings"),
+            ("Dashboard",     "dashboard"),
+            ("Incubators",    "incubators"),
+            ("Samples",       "samples"),
+            ("Trays",         "trays"),
+            ("Analytics",     "analytics"),
+            ("Calendar",      "timeline"),
+            ("Inspections",   "inspections"),
+            ("Settings",      "settings"),
         ]
         self._nav_btns = {}
+        self._nav_icons = {}   # key -> {"grey": CTkImage, "gold": CTkImage}
         for label, key in nav_items:
+            g = self._load_icon(key, "grey")
+            gold = self._load_icon(key, "gold")
+            self._nav_icons[key] = {"grey": g, "gold": gold}
             btn = ctk.CTkButton(
-                sb, text=label, anchor="w", height=40,
-                fg_color="transparent", hover_color=CARD,
-                text_color=TEXT, font=FONT_B, corner_radius=6,
+                sb, text="  " + label, anchor="w", height=40,
+                image=g, compound="left",
+                fg_color="transparent", hover_color="#1A2436",
+                text_color=SUBTEXT, font=("Segoe UI", 12), corner_radius=9,
                 command=lambda k=key: self.show_view(k)
             )
-            btn.pack(fill="x", padx=8, pady=1)
+            btn.pack(fill="x", padx=10, pady=2)
             self._nav_btns[key] = btn
 
         # Spacer
         ctk.CTkFrame(sb, fg_color="transparent").pack(fill="y", expand=True)
 
-        # Alert badge button
+        # Alert button pinned to the bottom — red-tinted
         self._alert_btn = ctk.CTkButton(
-            sb, text="🔔  Alerts  0", height=40, anchor="w",
-            fg_color=CARD, hover_color=CARD2,
-            text_color=SUBTEXT, font=FONT_B, corner_radius=6,
+            sb, text="  Alerts  0", height=40, anchor="w",
+            image=self._load_icon("alerts", "red"), compound="left",
+            fg_color="#2A1E20", hover_color="#3A2224",
+            text_color=RED_LT, font=("Segoe UI", 12, "bold"), corner_radius=10,
+            border_width=1, border_color="#5A2A2C",
             command=self._open_alerts
         )
-        self._alert_btn.pack(fill="x", padx=8, pady=(0, 16))
+        self._alert_btn.pack(fill="x", padx=10, pady=(0, 16))
 
     def _build_main(self):
-        self._main = ctk.CTkFrame(self, fg_color="#0F172A", corner_radius=0)
+        self._main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
         self._main.pack(side="left", fill="both", expand=True)
 
     def _build_status_bar(self):
-        sb = ctk.CTkFrame(self, fg_color=SIDEBAR, height=30, corner_radius=0)
+        sb = ctk.CTkFrame(self, fg_color=BARBG, height=32, corner_radius=0,
+                          border_width=0)
         sb.pack(side="bottom", fill="x")
         sb.pack_propagate(False)
-        self._status_govee = _label(sb, "Govee: —", FONT_S, SUBTEXT)
-        self._status_govee.pack(side="left", padx=16)
-        self._status_qr = _label(sb, "QR Server: —", FONT_S, SUBTEXT)
+        # top hairline divider
+        ctk.CTkFrame(sb, fg_color=SUBBORDER, height=1).pack(fill="x", side="top")
+        self._status_govee = _label(sb, "Govee: —", FONT_S, FAINT)
+        self._status_govee.pack(side="left", padx=(24, 16))
+        self._status_qr = _label(sb, "QR: —", FONT_S, FAINT)
         self._status_qr.pack(side="left", padx=16)
+        self._status_sensibo = _label(sb, "Sensibo: —", FONT_S, FAINT)
+        self._status_sensibo.pack(side="left", padx=16)
         self._status_time = _label(sb, "", FONT_S, SUBTEXT)
-        self._status_time.pack(side="right", padx=16)
+        self._status_time.pack(side="right", padx=24)
+        self._status_refresh = _label(sb, "", FONT_S, FAINT)
+        self._status_refresh.pack(side="right", padx=8)
 
         # Reload button — hidden until a code update is detected on disk.
         self._reload_btn = ctk.CTkButton(
@@ -1056,8 +1180,14 @@ class IncubationApp(ctk.CTk):
         # inc_detail is not a top-level nav item — keep the previous nav btn highlighted
         if name != "inc_detail":
             for k, btn in self._nav_btns.items():
-                btn.configure(fg_color=CARD if k == name else "transparent",
-                              text_color=GOLD if k == name else TEXT)
+                active = (k == name)
+                _ico = self._nav_icons.get(k, {})
+                btn.configure(
+                    fg_color="#25281E" if active else "transparent",   # spec exact
+                    hover_color="#2B2C1D" if active else "#1A2436",
+                    text_color=GOLD if active else SUBTEXT,
+                    image=_ico.get("gold" if active else "grey"),
+                    font=("Segoe UI", 12, "bold") if active else ("Segoe UI", 12))
         view = self._views[name]
         view.pack(fill="both", expand=True)
         self._current_view = name
@@ -1070,13 +1200,12 @@ class IncubationApp(ctk.CTk):
     def _build_dashboard(self) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(self._main, fg_color="transparent", corner_radius=0)
 
-        hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.pack(fill="x", padx=20, pady=(16, 8))
-        _label(hdr, "Dashboard", FONT_H, GOLD).pack(side="left")
-        _btn(hdr, "+ Incubator", lambda: self._open_incubator_dialog(),
-             fg=CARD, hover=CARD2, width=130).pack(side="right")
-        _btn(hdr, "Refresh", self._refresh_dashboard,
-             fg="transparent", hover=CARD, width=90).pack(side="right", padx=6)
+        hdr = self._screen_header(frame, "Dashboard",
+                                  "Live monitoring · incubator status & controls")
+        _btn_primary(hdr, "+ Incubator", lambda: self._open_incubator_dialog(),
+                     width=130).pack(side="right")
+        _btn_secondary(hdr, "Refresh", self._refresh_dashboard,
+                       width=100).pack(side="right", padx=8)
 
         # "Show hidden" toggle — only visible when hidden incubators exist
         self._dash_show_hidden = ctk.BooleanVar(value=False)
@@ -1093,13 +1222,16 @@ class IncubationApp(ctk.CTk):
 
         # Pack the right-hand mode panel FIRST so it reserves the right strip;
         # the card area then expands into all the remaining width.
-        mode_col = ctk.CTkFrame(body, fg_color=CARD, width=340, corner_radius=10)
-        mode_col.pack(side="right", fill="y", padx=(0, 12), pady=4)
+        mode_col = ctk.CTkFrame(body, fg_color=RIGHTPANE, width=300, corner_radius=0)
+        mode_col.pack(side="right", fill="y")
         mode_col.pack_propagate(False)
-        _label(mode_col, "Incubator Modes", FONT_H, GOLD).pack(
-            anchor="w", padx=14, pady=(12, 6))
-        self._dash_mode_panel = ctk.CTkScrollableFrame(mode_col, fg_color="transparent")
-        self._dash_mode_panel.pack(fill="both", expand=True, padx=6, pady=(0, 8))
+        _label(mode_col, "Incubator Modes", ("Segoe UI", 13, "bold"), GOLD).pack(
+            anchor="w", padx=16, pady=(16, 0))
+        _label(mode_col, "Set operating mode per unit", ("Segoe UI", 11), FAINT).pack(
+            anchor="w", padx=16, pady=(0, 8))
+        # Fixed (non-scrolling) — rows share the height so all units fit
+        self._dash_mode_panel = ctk.CTkFrame(mode_col, fg_color="transparent")
+        self._dash_mode_panel.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
         self._dash_scroll = ctk.CTkScrollableFrame(
             body, fg_color="transparent", corner_radius=0)
@@ -1119,30 +1251,49 @@ class IncubationApp(ctk.CTk):
             return
         for w in panel.winfo_children():
             w.destroy()
-        mode_labels = [v["label"] for v in calc.TEMP_MODES.values()]
+        panel.columnconfigure(0, weight=1)
         incs = db.get_incubators(include_hidden=True)
         if not incs:
             _label(panel, "No incubators yet.", FONT_S, SUBTEXT).pack(pady=10)
             return
-        for inc in incs:
-            row = ctk.CTkFrame(panel, fg_color=CARD2, corner_radius=8)
-            row.pack(fill="x", pady=4, padx=2)
-            # Name (left) + Edit button (right) on one line
+        # Spec: Off / Cool / Inc / Hold short segments, active = mode color
+        _SEGS = [("off", "Off"), ("cool_storage", "Cool"),
+                 ("incubation", "Inc"), ("holding", "Hold")]
+        for _ri, inc in enumerate(incs):
+            panel.rowconfigure(_ri, weight=1, uniform="moderow")
+            row = ctk.CTkFrame(panel, fg_color=NESTED, corner_radius=10,
+                               border_width=1, border_color=BORDER2)
+            row.grid(row=_ri, column=0, sticky="nsew", pady=3, padx=2)
             head = ctk.CTkFrame(row, fg_color="transparent")
-            head.pack(fill="x", padx=10, pady=(8, 2))
-            _label(head, inc["name"], FONT_B, GOLD).pack(side="left")
-            _btn(head, "✎ Edit", lambda i=inc: self._open_incubator_dialog(i),
-                 width=70, height=24, fg=BORDER, hover=CARD).pack(side="right")
-            mode_key = inc.get("temp_mode", "incubation")
-            cfg = calc.TEMP_MODES.get(mode_key, calc.TEMP_MODES["incubation"])
-            var = ctk.StringVar(value=cfg["label"])
-            seg = ctk.CTkSegmentedButton(
-                row, values=mode_labels, variable=var, height=30, font=FONT_S,
-                command=lambda label, i=inc["id"]: self._on_dash_mode(label, i))
-            seg.pack(fill="x", padx=10, pady=(0, 10))
+            head.pack(fill="x", padx=10, pady=(8, 4))
+            _label(head, inc["name"], ("Segoe UI", 12, "bold"),
+                   "#E5E7EB").pack(side="left")
+            _btn(head, "✎", lambda i=inc: self._open_incubator_dialog(i),
+                 width=28, height=22, fg="transparent",
+                 hover=CARD2, text_color=SUBTEXT).pack(side="right")
+            segrow = ctk.CTkFrame(row, fg_color="transparent")
+            segrow.pack(fill="x", padx=10, pady=(0, 9))
+            cur = inc.get("temp_mode", "incubation")
+            for ci in range(4):
+                segrow.columnconfigure(ci, weight=1, uniform="seg")
+            for ci, (key, short) in enumerate(_SEGS):
+                active = (key == cur)
+                mcol   = MODE_COLORS[key]
+                ctk.CTkButton(
+                    segrow, text=short, height=28, width=40, corner_radius=6,
+                    font=("Segoe UI", 10, "bold" if active else "normal"),
+                    fg_color=_mix(mcol, NESTED, 0.22) if active else CARD,
+                    hover_color=_mix(mcol, NESTED, 0.30) if active else CARD2,
+                    text_color=mcol if active else "#94A3B8",
+                    border_width=1,
+                    border_color=mcol if active else "#2A3648",
+                    command=lambda k=key, i=inc["id"]: self._on_dash_mode_key(k, i),
+                ).grid(row=0, column=ci, sticky="ew", padx=2)
 
     def _on_dash_mode(self, label: str, inc_id: int):
-        key  = calc._MODE_BY_LABEL.get(label, "incubation")
+        self._on_dash_mode_key(calc._MODE_BY_LABEL.get(label, "incubation"), inc_id)
+
+    def _on_dash_mode_key(self, key: str, inc_id: int):
         prev = next((x for x in db.get_incubators(include_hidden=True)
                      if x["id"] == inc_id), {}).get("temp_mode", "incubation")
         if key == prev:
@@ -1204,20 +1355,24 @@ class IncubationApp(ctk.CTk):
         fill_pct       = round(tray_count / total_capacity * 100) if total_capacity else 0
         fill_col       = GREEN if fill_pct < 80 else (ORANGE if fill_pct < 95 else RED)
 
-        summary_f = ctk.CTkFrame(container, fg_color=CARD, corner_radius=10)
-        summary_f.pack(fill="x", pady=(0, 12), padx=4)
-
-        for txt, val, col in [
-            ("Active Incubators", str(len(incubators)),            GOLD),
+        _n_alerts = len(db.get_active_alerts())
+        summary_f = ctk.CTkFrame(container, fg_color="transparent")
+        summary_f.pack(fill="x", pady=(0, 14), padx=4)
+        metrics = [
+            ("Active Incubators", str(len(incubators)),               GOLD),
             ("Trays",             f"{tray_count} / {total_capacity}", GOLD),
-            ("Capacity",          f"{fill_pct}% full",             fill_col),
-            ("Total Gals",        f"{total_gals:.1f}",             GOLD),
-            ("Active Alerts",     str(len(db.get_active_alerts())), GOLD),
-        ]:
-            sf = ctk.CTkFrame(summary_f, fg_color="transparent")
-            sf.pack(side="left", padx=20, pady=10)
-            _label(sf, val, ("Segoe UI", 20, "bold"), col).pack()
-            _label(sf, txt, FONT_S, SUBTEXT).pack()
+            ("Capacity",          f"{fill_pct}% full",                fill_col),
+            ("Total Gals",        f"{total_gals:.1f}",                GOLD),
+            ("Active Alerts",     str(_n_alerts),  RED if _n_alerts else GOLD),
+        ]
+        for i in range(len(metrics)):
+            summary_f.columnconfigure(i, weight=1, uniform="metric")
+        for i, (txt, val, col) in enumerate(metrics):
+            mc = ctk.CTkFrame(summary_f, fg_color=PANEL, corner_radius=12,
+                              border_width=1, border_color=BORDER2)
+            mc.grid(row=0, column=i, sticky="ew", padx=6)
+            _label(mc, val, ("Segoe UI", 22, "bold"), col).pack(anchor="w", padx=16, pady=(14, 0))
+            _label(mc, txt, ("Segoe UI", 11), SUBTEXT).pack(anchor="w", padx=16, pady=(0, 14))
 
         # Responsive card grid — rebuilds on window resize (debounced)
         grid = ctk.CTkFrame(container, fg_color="transparent")
@@ -1254,8 +1409,8 @@ class IncubationApp(ctk.CTk):
     def _make_inc_card(self, parent, inc: dict) -> ctk.CTkFrame:
         is_hidden = bool(inc.get("is_hidden"))
         card_bg   = "#161E2C" if is_hidden else CARD
-        title_col = SUBTEXT  if is_hidden else GOLD
-        bdr_col   = "#222D3D" if is_hidden else BORDER
+        title_col = SUBTEXT  if is_hidden else TEXT
+        bdr_col   = "#222D3D" if is_hidden else "#263347"
 
         # Red outline when this incubator has an active alert
         has_alert  = inc["id"] in getattr(self, "_alert_inc_ids", set())
@@ -1263,7 +1418,7 @@ class IncubationApp(ctk.CTk):
         if has_alert:
             bdr_col = RED
 
-        card = ctk.CTkFrame(parent, fg_color=card_bg, corner_radius=12,
+        card = ctk.CTkFrame(parent, fg_color=card_bg, corner_radius=11,
                             border_width=bdr_width, border_color=bdr_col)
 
         # ── Readings ──
@@ -1275,12 +1430,20 @@ class IncubationApp(ctk.CTk):
         temp_c = reading.get("temp_c")
         hum    = reading.get("humidity")
 
-        t_min, t_max = calc.get_temp_range(inc)
+        t_min, t_max   = calc.get_temp_range(inc)
+        unit           = db.get_setting("temp_unit", "C")
+        goal_t, goal_h = db.get_mode_goals(inc.get("temp_mode", "incubation"))
         if temp_c is not None:
-            unit  = db.get_setting("temp_unit", "C")
             t_str = calc.format_temp(temp_c, unit)
-            t_col = SUBTEXT if t_min is None else (GREEN if t_min <= temp_c <= t_max else RED)
-            h_col = TEXT
+            # Temp color rule: vs goal (≤1°=green, ≤3°=orange, else red); else range
+            if goal_t is not None:
+                _d = abs(temp_c - goal_t)
+                t_col = GREEN if _d <= 1 else (ORANGE if _d <= 3 else RED)
+            elif t_min is not None:
+                t_col = GREEN if t_min <= temp_c <= t_max else RED
+            else:
+                t_col = SUBTEXT
+            h_col = GOLD
             problems  = calc.check_temp_humidity(inc, temp_c, hum)
             dot_color = RED if problems else GREEN
         else:
@@ -1291,49 +1454,56 @@ class IncubationApp(ctk.CTk):
         hdr = ctk.CTkFrame(card, fg_color="transparent")
         hdr.pack(fill="x", padx=14, pady=(12, 6))
         name_txt = f"{inc['name']}  (hidden)" if is_hidden else inc["name"]
-        _label(hdr, name_txt, FONT_H, title_col).pack(side="left")
+        _label(hdr, name_txt, ("Segoe UI", 13, "bold"), title_col).pack(side="left")
         mode_key = inc.get("temp_mode", "incubation")
         mode_cfg = calc.TEMP_MODES.get(mode_key, calc.TEMP_MODES["incubation"])
+        _mcol = MODE_COLORS.get(mode_key, BLUE)
         ctk.CTkLabel(hdr, text=mode_cfg["label"], font=("Segoe UI", 9, "bold"),
-                     fg_color="#1E3A5F", text_color="#7DD3FC",
-                     corner_radius=4, height=20, padx=6).pack(side="left", padx=(8, 0))
-        alerts_on = bool(inc.get("temp_alerts_enabled", 1))
-        ctk.CTkButton(
-            hdr, text="🔔 Alerts" if alerts_on else "🔕 Alerts Off",
-            font=("Segoe UI", 9, "bold"),
-            fg_color="#1C3A1C" if alerts_on else "#3A1C1C",
-            hover_color=CARD2,
-            text_color=GREEN if alerts_on else "#EF4444",
-            corner_radius=4, height=20, width=90,
-            command=lambda i=inc: self._toggle_temp_alerts(i)
-        ).pack(side="left", padx=(6, 0))
+                     fg_color=MODE_BADGE_BG.get(mode_key, _mix(_mcol, card_bg, 0.20)),
+                     text_color=_mcol,
+                     corner_radius=6, height=20, padx=8).pack(side="left", padx=(8, 0))
+        if has_alert:
+            _n = sum(1 for a in db.get_active_alerts()
+                     if a.get("incubator_id") == inc["id"])
+            ctk.CTkLabel(hdr, text=f"{_n} Alert{'s' if _n != 1 else ''}",
+                         font=("Segoe UI", 9, "bold"),
+                         fg_color=_mix(RED, card_bg, 0.16), text_color=RED_LT,
+                         corner_radius=6, height=20, padx=8).pack(side="left", padx=(6, 0))
         lbl_dot = _label(hdr, "●", ("Segoe UI", 18), dot_color)
         lbl_dot.pack(side="right")
+        # Subtle bell toggle for temp alerts (spec has no header toggle — keep it minimal)
+        alerts_on = bool(inc.get("temp_alerts_enabled", 1))
+        ctk.CTkButton(
+            hdr, text="🔔" if alerts_on else "🔕", width=26, height=22,
+            fg_color="transparent", hover_color=CARD2,
+            text_color=SUBTEXT if alerts_on else "#6B7280",
+            font=("Segoe UI", 12), corner_radius=6,
+            command=lambda i=inc: self._toggle_temp_alerts(i)
+        ).pack(side="right", padx=(0, 4))
 
-        # ── Large temp / humidity boxes (with per-mode goals) ──
-        unit_g          = db.get_setting("temp_unit", "C")
-        goal_t, goal_h  = db.get_mode_goals(inc.get("temp_mode", "incubation"))
-
+        # ── Large temp / humidity tiles (with per-mode goals) ──
         sensor_row = ctk.CTkFrame(card, fg_color="transparent")
         sensor_row.pack(fill="x", padx=12, pady=(0, 8))
         sensor_row.columnconfigure(0, weight=1)
         sensor_row.columnconfigure(1, weight=1)
 
-        tf = ctk.CTkFrame(sensor_row, fg_color=CARD2, corner_radius=8)
+        tf = ctk.CTkFrame(sensor_row, fg_color=CARD2, corner_radius=8,
+                          border_width=1, border_color="#2A3648")
         tf.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
-        _label(tf, "Temp", FONT_S, SUBTEXT).pack(pady=(8, 0))
-        lbl_temp = _label(tf, t_str if temp_c is not None else "—", ("Segoe UI", 22, "bold"), t_col)
+        _label(tf, "TEMP", ("Segoe UI", 9, "bold"), SUBTEXT).pack(pady=(8, 0))
+        lbl_temp = _label(tf, t_str if temp_c is not None else "—", ("Segoe UI", 20, "bold"), t_col)
         lbl_temp.pack(pady=(2, 0))
-        _label(tf, f"Goal {calc.format_temp(goal_t, unit_g)}" if goal_t is not None else "—",
-               FONT_S, SUBTEXT).pack(pady=(0, 8))
+        _label(tf, f"Goal {calc.format_temp(goal_t, unit)}" if goal_t is not None else "—",
+               ("Segoe UI", 9), FAINT).pack(pady=(0, 8))
 
-        hf = ctk.CTkFrame(sensor_row, fg_color=CARD2, corner_radius=8)
+        hf = ctk.CTkFrame(sensor_row, fg_color=CARD2, corner_radius=8,
+                          border_width=1, border_color="#2A3648")
         hf.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
-        _label(hf, "Humidity", FONT_S, SUBTEXT).pack(pady=(8, 0))
-        lbl_hum = _label(hf, f"{hum:.0f}%" if hum is not None else "—", ("Segoe UI", 22, "bold"), h_col)
+        _label(hf, "HUMIDITY", ("Segoe UI", 9, "bold"), SUBTEXT).pack(pady=(8, 0))
+        lbl_hum = _label(hf, f"{hum:.0f}%" if hum is not None else "—", ("Segoe UI", 20, "bold"), h_col)
         lbl_hum.pack(pady=(2, 0))
         _label(hf, f"Goal {goal_h:.0f}%" if goal_h is not None else "—",
-               FONT_S, SUBTEXT).pack(pady=(0, 8))
+               ("Segoe UI", 9), FAINT).pack(pady=(0, 8))
 
         # ── Bottom row: status/events left, tray info right ──
         bottom = ctk.CTkFrame(card, fg_color="transparent")
@@ -1359,14 +1529,25 @@ class IncubationApp(ctk.CTk):
         else:
             _label(left, "No upcoming events", FONT_S, SUBTEXT).pack(anchor="w")
 
-        # Right: tray count + fill % — aggregate query, no full row fetch
+        # Right: tray count — aggregate query, no full row fetch
         right = ctk.CTkFrame(bottom, fg_color="transparent")
         right.grid(row=0, column=1, sticky="e")
         _ts    = db.get_tray_stats(incubator_id=inc["id"], status=db.IN_INCUBATOR_STATUSES)
         capacity   = inc.get("capacity") or 50
         fill_pct   = round(_ts["count"] / capacity * 100) if capacity else 0
-        _label(right, f"{_ts['count']} / {capacity} trays", FONT_S, TEXT).pack(anchor="e")
-        _label(right, f"{fill_pct}% filled  •  {_ts['total_gals']:.1f} gal", FONT_S, SUBTEXT).pack(anchor="e")
+        _label(right, f"{_ts['count']} / {capacity} trays",
+               ("Segoe UI", 10, "bold"), TEXT2).pack(anchor="e")
+
+        # ── Capacity bar (spec: 6px track, gold fill) ──
+        cap_bar = ctk.CTkProgressBar(
+            card, height=6, corner_radius=5,
+            fg_color=CARD2, progress_color=GOLD)
+        cap_bar.set(min(fill_pct / 100, 1.0))
+        cap_bar.pack(fill="x", padx=14, pady=(2, 0))
+        cap_sub = ctk.CTkFrame(card, fg_color="transparent")
+        cap_sub.pack(fill="x", padx=14, pady=(1, 6))
+        _label(cap_sub, f"{fill_pct}% filled", ("Segoe UI", 9), FAINT).pack(side="left")
+        _label(cap_sub, f"{_ts['total_gals']:.1f} gal", ("Segoe UI", 9), FAINT).pack(side="right")
 
         # ── Sensibo AC manual controls (only when a device ID is configured) ──
         if inc.get("sensibo_device_id"):
@@ -1429,11 +1610,10 @@ class IncubationApp(ctk.CTk):
     def _build_incubators_view(self) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(self._main, fg_color="transparent", corner_radius=0)
 
-        hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.pack(fill="x", padx=20, pady=(16, 8))
-        _label(hdr, "Incubators", FONT_H, GOLD).pack(side="left")
-        _btn(hdr, "+ Add Incubator", lambda: self._open_incubator_dialog(),
-             fg=CARD, hover=CARD2, width=140).pack(side="right")
+        hdr = self._screen_header(frame, "Incubators",
+                                  "Per-unit detail & inspection history")
+        _btn_primary(hdr, "+ Add Incubator", lambda: self._open_incubator_dialog(),
+                     width=150).pack(side="right")
 
         self._inc_scroll = ctk.CTkScrollableFrame(
             frame, fg_color="transparent", corner_radius=0)
@@ -1452,11 +1632,11 @@ class IncubationApp(ctk.CTk):
 
         for inc in incubators:
             hidden    = bool(inc.get("is_hidden"))
-            row_bg    = "#161E2C" if hidden else CARD
-            bdr_col   = "#222D3D" if hidden else BORDER
+            row_bg    = "#141C2B" if hidden else PANEL
+            bdr_col   = "#1E2938" if hidden else BORDER2
             name_col  = SUBTEXT  if hidden else GOLD
 
-            row = ctk.CTkFrame(container, fg_color=row_bg, corner_radius=10,
+            row = ctk.CTkFrame(container, fg_color=row_bg, corner_radius=12,
                                border_width=1, border_color=bdr_col)
             row.pack(fill="x", padx=4, pady=4)
 
@@ -1601,18 +1781,18 @@ class IncubationApp(ctk.CTk):
     def _build_samples_view(self) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(self._main, fg_color="transparent", corner_radius=0)
 
-        hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.pack(fill="x", padx=20, pady=(16, 8))
-        _label(hdr, "Samples & X-Ray Results", FONT_H, GOLD).pack(side="left")
-        _btn(hdr, "Import Spreadsheet", self._import_xray,
-             fg=BLUE, hover="#1D4ED8", text_color="white", width=160).pack(side="right")
-        _btn(hdr, "Merge Duplicates", self._merge_duplicate_samples,
-             fg="#7C3AED", hover="#6D28D9", text_color="white", width=140).pack(side="right", padx=6)
-        _btn(hdr, "+ Add Sample", lambda: self._open_sample_dialog(),
-             fg=CARD, hover=CARD2, width=130).pack(side="right", padx=6)
+        hdr = self._screen_header(frame, "Samples",
+                                  "X-Ray results & sample records")
+        _btn_primary(hdr, "+ Add Sample", lambda: self._open_sample_dialog(),
+                     width=130).pack(side="right")
+        _btn_secondary(hdr, "Merge Duplicates", self._merge_duplicate_samples,
+                       width=140).pack(side="right", padx=8)
+        _btn_secondary(hdr, "Import Spreadsheet", self._import_xray,
+                       width=150).pack(side="right")
 
         # Search box — filter the sample list by name as you type
-        sbar = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=8)
+        sbar = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=10,
+                            border_width=1, border_color=BORDER2)
         sbar.pack(fill="x", padx=12, pady=(0, 6))
         _label(sbar, "Search:", FONT_S, SUBTEXT).pack(side="left", padx=10, pady=6)
         self._smp_search = ctk.CTkEntry(
@@ -1632,61 +1812,38 @@ class IncubationApp(ctk.CTk):
         self._smp_count_lbl = _label(sbar, "", FONT_S, SUBTEXT)
         self._smp_count_lbl.pack(side="right", padx=12, pady=6)
 
-        self._smp_cols = ("Name", "Total Kg", "Live Bees/Kg", "Parasites", "Chalkbrood",
-                "Total Gal", "Kg for 2gal", "Expected Trays", "Actual Trays",
-                "Inc. Space", "Notes")
-        cols = self._smp_cols
-        self._smp_tree = self._make_tree(frame, cols)
-        self._smp_tree.pack(fill="both", expand=True, padx=12, pady=4)
-        self._smp_tree.bind("<Double-1>", self._on_sample_double_click)
-        self._smp_sort_col = None
+        # Label-grid table (per the CTk guide) — link-blue names, styled cells
+        tbl = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=12,
+                           border_width=1, border_color=BORDER2)
+        tbl.pack(fill="both", expand=True, padx=12, pady=4)
+        self._smp_scroll = ctk.CTkScrollableFrame(tbl, fg_color="transparent")
+        self._smp_scroll.pack(fill="both", expand=True, padx=2, pady=2)
+        self._smp_sort_col = 0
         self._smp_sort_asc = True
-        for ci, col in enumerate(cols):
-            self._smp_tree.heading(col, text=col,
-                command=lambda c=ci: self._sort_sample_tree(c))
         return frame
 
+    # (label, grid weight, align 'w'|'e', kind)
+    _SMP_COLS = [
+        ("Name", 3, "w", "link"), ("Total Kg", 1, "e", "num"),
+        ("Live Bees/Kg", 2, "e", "num"), ("Parasites", 1, "e", "num"),
+        ("Chalkbrood", 1, "e", "num"), ("Total Gal", 1, "e", "num"),
+        ("Kg for 2gal", 1, "e", "num"), ("Expected", 1, "e", "num"),
+        ("Actual", 1, "e", "num"), ("Inc. Space", 1, "w", "text"),
+        ("Notes", 3, "w", "text"),
+    ]
+
     def _sort_sample_tree(self, col_idx: int):
-        tree = self._smp_tree
         if self._smp_sort_col == col_idx:
             self._smp_sort_asc = not self._smp_sort_asc
         else:
             self._smp_sort_col = col_idx
             self._smp_sort_asc = True
-
-        cols = self._smp_cols
-        for ci, col in enumerate(cols):
-            arrow = (" ↑" if self._smp_sort_asc else " ↓") if ci == col_idx else ""
-            tree.heading(col, text=col + arrow,
-                command=lambda c=ci: self._sort_sample_tree(c))
-
-        # Read values positionally (column names contain spaces/'/' which ttk
-        # can't resolve as lookup identifiers).
-        rows = []
-        for iid in tree.get_children():
-            vals = tree.item(iid, "values")
-            sort_val = vals[col_idx] if col_idx < len(vals) else ""
-            name_val = vals[0] if vals else ""
-            rows.append((sort_val, name_val, iid))
-
-        def _sort_key(val):
-            # Consistent 3-part tuple so a column can mix numbers and text
-            # without raising. Order: numbers, then text, then blanks.
-            if val is None or val == "—":
-                return (2, 0.0, "")
-            try:
-                return (0, float(str(val).replace("%", "").replace(",", "")), "")
-            except (ValueError, AttributeError):
-                return (1, 0.0, str(val).lower())
-
-        rows.sort(key=lambda x: _sort_key(x[1]))               # secondary: name
-        rows.sort(key=lambda x: _sort_key(x[0]), reverse=not self._smp_sort_asc)
-        for idx, (_, _, iid) in enumerate(rows):
-            tree.move(iid, "", idx)
+        self._refresh_samples()
 
     def _refresh_samples(self):
-        tree = self._smp_tree
-        tree.delete(*tree.get_children())
+        scroll = self._smp_scroll
+        for w in scroll.winfo_children():
+            w.destroy()
 
         def _n(v, dec=1):
             return f"{v:,.{dec}f}" if isinstance(v, (int, float)) else "—"
@@ -1710,21 +1867,20 @@ class IncubationApp(ctk.CTk):
             q = self._smp_search.get().strip().lower()
 
         samples = db.get_samples()
-        actual_counts = db.get_tray_counts_by_sample(statuses=None)  # all trays per sample
+        actual_counts = db.get_tray_counts_by_sample(statuses=None)
 
-        # Year filter — keep samples used by trays started in the chosen year
         yr = getattr(self, "_smp_year", None)
         yr = yr.get() if yr else "All Years"
         if yr and yr != "All Years":
             year_ids = db.current_year_sample_ids(int(yr))
             samples = [s for s in samples if s["id"] in year_ids]
 
-        shown = 0
+        # Build (id, [display values]) rows
+        data = []
         for s in samples:
             if q and q not in (s["name"] or "").lower():
                 continue
-            shown += 1
-            tree.insert("", "end", iid=str(s["id"]), values=(
+            data.append((s["id"], [
                 s["name"],
                 _kg(s.get("total_weight_lbs"), s.get("total_weight_kg")),
                 _per_kg(s.get("live_bees_per_lb"), s.get("live_bees_per_kg")),
@@ -1736,19 +1892,61 @@ class IncubationApp(ctk.CTk):
                  if isinstance(s.get("total_trays"), (int, float)) else "—"),
                 str(actual_counts.get(s["id"], 0)),
                 s.get("incubator_space") or "—",
-                s.get("notes") or "",
-            ))
+                (s.get("notes") or "").replace("\n", " "),
+            ]))
+
+        # Sort by the active column
+        sc = self._smp_sort_col
+
+        def _key(row):
+            v = row[1][sc]
+            if v is None or v == "—":
+                return (2, 0.0, "")
+            try:
+                return (0, float(str(v).replace("%", "").replace(",", "")), "")
+            except (ValueError, AttributeError):
+                return (1, 0.0, str(v).lower())
+        data.sort(key=lambda r: str(r[1][0]).lower())
+        data.sort(key=_key, reverse=not self._smp_sort_asc)
+
+        # Header row (clickable to sort)
+        hdr = ctk.CTkFrame(scroll, fg_color="transparent")
+        hdr.pack(fill="x", pady=(0, 2))
+        for ci, (lbl, wt, al, kind) in enumerate(self._SMP_COLS):
+            hdr.columnconfigure(ci, weight=wt, uniform="smp")
+            arrow = (" ↑" if self._smp_sort_asc else " ↓") if ci == sc else ""
+            ctk.CTkButton(
+                hdr, text=lbl + arrow, height=30, corner_radius=6,
+                anchor="w" if al == "w" else "e",
+                fg_color="transparent", hover_color=CARD2, text_color=GOLD,
+                font=("Segoe UI", 11, "bold"),
+                command=lambda c=ci: self._sort_sample_tree(c)
+            ).grid(row=0, column=ci, sticky="ew", padx=1)
+        ctk.CTkFrame(scroll, fg_color=BORDER2, height=1).pack(fill="x")
+
+        # Data rows
+        for i, (sid, vals) in enumerate(data):
+            rf = ctk.CTkFrame(scroll, fg_color=PANEL if i % 2 == 0 else "#18222F",
+                              corner_radius=0)
+            rf.pack(fill="x")
+            for ci, (lbl, wt, al, kind) in enumerate(self._SMP_COLS):
+                rf.columnconfigure(ci, weight=wt, uniform="smp")
+                col = LINK if kind == "link" else (
+                    "#E5E7EB" if al == "e" else "#CBD5E1")
+                _label(rf, str(vals[ci]), ("Segoe UI", 11), col,
+                       anchor="w" if al == "w" else "e", wraplength=200 if kind == "text" else 0
+                       ).grid(row=0, column=ci, sticky="ew", padx=8, pady=6)
+            rf.bind("<Double-1>", lambda e, s=sid: self._open_sample_by_id(s))
+            for ch in rf.winfo_children():
+                ch.bind("<Double-1>", lambda e, s=sid: self._open_sample_by_id(s))
+
         if getattr(self, "_smp_count_lbl", None) is not None:
             self._smp_count_lbl.configure(
-                text=f"{shown} of {len(samples)} samples" if q else f"{len(samples)} samples")
+                text=f"{len(data)} of {len(samples)} samples" if q
+                else f"{len(samples)} samples")
 
-    def _on_sample_double_click(self, event):
-        sel = self._smp_tree.selection()
-        if not sel:
-            return
-        sid = int(sel[0])
-        samples = db.get_samples()
-        sample  = next((s for s in samples if s["id"] == sid), None)
+    def _open_sample_by_id(self, sid: int):
+        sample = next((s for s in db.get_samples() if s["id"] == sid), None)
         if sample:
             self._open_sample_dialog(sample)
 
@@ -1758,11 +1956,10 @@ class IncubationApp(ctk.CTk):
 
     def _build_analytics_view(self) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(self._main, fg_color="transparent", corner_radius=0)
-        hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.pack(fill="x", padx=20, pady=(16, 8))
-        _label(hdr, "Analytics", FONT_H, GOLD).pack(side="left")
-        _btn(hdr, "Refresh", self._refresh_analytics, fg=DK_GOLD, hover=GOLD,
-             text_color="black", width=100).pack(side="right")
+        hdr = self._screen_header(frame, "Analytics",
+                                  "Sample & incubation performance")
+        _btn_secondary(hdr, "Refresh", self._refresh_analytics,
+                       width=100).pack(side="right")
         _yrs = self._tray_years()
         self._an_year = _combo(hdr, ["All Years"] + _yrs, 120)
         _cur = str(datetime.now().year)
@@ -1798,9 +1995,11 @@ class IncubationApp(ctk.CTk):
         self._an_cycle_stats(body, year)
 
     def _an_card(self, parent, title):
-        card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=10)
-        card.pack(fill="x", padx=4, pady=6)
-        _label(card, title, FONT_H, GOLD).pack(anchor="w", padx=14, pady=(10, 2))
+        card = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=12,
+                            border_width=1, border_color=BORDER2)
+        card.pack(fill="x", padx=4, pady=7)
+        _label(card, title, ("Segoe UI", 12, "bold"), GOLD).pack(
+            anchor="w", padx=16, pady=(12, 2))
         return card
 
     def _an_kpi_cards(self, parent, samples, actual):
@@ -1820,11 +2019,16 @@ class IncubationApp(ctk.CTk):
         ]
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", pady=(4, 8))
-        for lbl, val in cards:
-            c = ctk.CTkFrame(row, fg_color=CARD, corner_radius=10)
-            c.pack(side="left", expand=True, fill="x", padx=4)
-            _label(c, val, ("Segoe UI", 20, "bold"), GOLD).pack(pady=(12, 0))
-            _label(c, lbl, FONT_S, SUBTEXT).pack(pady=(0, 12))
+        for i in range(len(cards)):
+            row.columnconfigure(i, weight=1, uniform="an_kpi")
+        for i, (lbl, val) in enumerate(cards):
+            c = ctk.CTkFrame(row, fg_color=PANEL, corner_radius=12,
+                             border_width=1, border_color=BORDER2)
+            c.grid(row=0, column=i, sticky="ew", padx=5)
+            _label(c, val, ("Segoe UI", 22, "bold"), GOLD).pack(
+                anchor="w", padx=16, pady=(14, 0))
+            _label(c, lbl, ("Segoe UI", 11), SUBTEXT).pack(
+                anchor="w", padx=16, pady=(0, 14))
 
     def _an_bar_chart(self, parent, title, samples, key, fmt, color, top=15):
         card = self._an_card(parent, title)
@@ -1925,33 +2129,37 @@ class IncubationApp(ctk.CTk):
     def _build_trays_view(self) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(self._main, fg_color="transparent", corner_radius=0)
 
-        hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.pack(fill="x", padx=20, pady=(16, 8))
-        _label(hdr, "Trays", FONT_H, GOLD).pack(side="left")
-        _btn(hdr, "+ Add Tray", lambda: self._open_tray_dialog(),
-             fg=DK_GOLD, hover=GOLD, text_color="black", width=110).pack(side="right")
+        hdr = self._screen_header(frame, "Trays",
+                                  "Tray inventory & release tracking")
+        _btn_primary(hdr, "+ Add Tray", lambda: self._open_tray_dialog(),
+                     width=110).pack(side="right")
         _btn(hdr, "🗑 Delete All", self._delete_all_trays,
-             fg=RED, hover="#B91C1C", text_color="white", width=110).pack(side="right", padx=6)
-        _btn(hdr, "Set Status →", self._bulk_set_status,
-             fg=BLUE, hover="#1D4ED8", text_color="white", width=110).pack(side="right", padx=(6, 0))
+             fg="#3A1C1E", hover="#4A2225", text_color=RED_LT,
+             height=34, width=110, border_width=1,
+             border_color="#5A2A2C").pack(side="right", padx=8)
+        _btn_secondary(hdr, "Set Status →", self._bulk_set_status,
+                       width=110).pack(side="right", padx=(8, 0))
         self._bulk_status = _combo(hdr, [lbl for _v, lbl in db.TRAY_STATUS_OPTIONS], 120)
         self._bulk_status.set("Released")
         self._bulk_status.pack(side="right", padx=6)
-        _btn(hdr, "QR Code", self._show_selected_qr,
-             fg=CARD, hover=CARD2, width=90).pack(side="right", padx=6)
-        _btn(hdr, "History", self._show_tray_history,
-             fg=CARD, hover=CARD2, width=90).pack(side="right", padx=6)
-        _btn(hdr, "Release CSV", lambda: self._release_csv_import(on_complete=self._refresh_trays),
-             fg="#7C3AED", hover="#6D28D9", text_color="white", width=110).pack(side="right", padx=6)
-        _btn(hdr, "⬇ Release Template", lambda: self._release_csv_template(),
-             fg=BORDER, hover=CARD2, width=150).pack(side="right", padx=(0, 2))
-        _btn(hdr, "Import CSV", lambda: self._tray_csv_import(on_complete=self._refresh_trays),
-             fg=TEAL, hover="#0D9488", text_color="white", width=100).pack(side="right", padx=6)
-        _btn(hdr, "⬇ Template", lambda: self._tray_csv_template(),
-             fg=BORDER, hover=CARD2, width=110).pack(side="right", padx=(0, 2))
+        _btn_secondary(hdr, "QR Code", self._show_selected_qr,
+                       width=90).pack(side="right", padx=6)
+        _btn_secondary(hdr, "History", self._show_tray_history,
+                       width=90).pack(side="right", padx=6)
+        _btn_secondary(hdr, "Release CSV",
+                       lambda: self._release_csv_import(on_complete=self._refresh_trays),
+                       width=110).pack(side="right", padx=6)
+        _btn_secondary(hdr, "⬇ Release Template", lambda: self._release_csv_template(),
+                       width=150).pack(side="right")
+        _btn_secondary(hdr, "Import CSV",
+                       lambda: self._tray_csv_import(on_complete=self._refresh_trays),
+                       width=105).pack(side="right", padx=6)
+        _btn_secondary(hdr, "⬇ Template", lambda: self._tray_csv_template(),
+                       width=110).pack(side="right")
 
         # Filter bar
-        fbar = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=8)
+        fbar = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=10,
+                            border_width=1, border_color=BORDER2)
         fbar.pack(fill="x", padx=12, pady=(0, 6))
         _label(fbar, "Filter:", FONT_S, SUBTEXT).pack(side="left", padx=10, pady=6)
 
@@ -1988,65 +2196,157 @@ class IncubationApp(ctk.CTk):
         self._cooldown_lbl = _label(fbar, "", FONT_S, TEAL)
         self._cooldown_lbl.pack(side="right", padx=12, pady=6)
 
-        cols = ("Tray #", "Sample", "Incubator", "Weight (Kg)", "Live Count",
-                "Parasite %", "Chalkbrood %", "Start Date", "Release Date",
-                "Cool Days", "Status")
-        self._tray_tree = self._make_tree(frame, cols)
-        self._tray_tree.pack(fill="both", expand=True, padx=12, pady=4)
-        self._tray_tree.bind("<Double-1>", self._on_tray_double_click)
-        self._tray_sort_col = None   # currently sorted column index
+        # Label-grid table with pagination (fast even at thousands of rows)
+        tbl = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=12,
+                           border_width=1, border_color=BORDER2)
+        tbl.pack(fill="both", expand=True, padx=12, pady=(4, 2))
+        self._tray_scroll = ctk.CTkScrollableFrame(tbl, fg_color="transparent")
+        self._tray_scroll.pack(fill="both", expand=True, padx=2, pady=2)
+
+        pg = ctk.CTkFrame(frame, fg_color="transparent")
+        pg.pack(fill="x", padx=14, pady=(0, 4))
+        self._tray_prev_btn = _btn_secondary(pg, "‹ Prev", self._tray_prev_page, width=80)
+        self._tray_prev_btn.pack(side="left")
+        self._tray_page_lbl = _label(pg, "", FONT_S, SUBTEXT)
+        self._tray_page_lbl.pack(side="left", padx=10)
+        self._tray_next_btn = _btn_secondary(pg, "Next ›", self._tray_next_page, width=80)
+        self._tray_next_btn.pack(side="left")
+        self._tray_sel_lbl = _label(pg, "", FONT_S, TEAL)
+        self._tray_sel_lbl.pack(side="right")
+
+        self._tray_sort_col = 0
         self._tray_sort_asc = True
-
-        for ci, col in enumerate(cols):
-            self._tray_tree.heading(col, text=col,
-                command=lambda c=ci: self._sort_tray_tree(c))
-
+        self._tray_page = 0
+        self._tray_sel = set()
+        self._tray_all = []
+        self._tray_row_frames = {}
         return frame
 
+    # (label, weight, align, kind)
+    _TRAY_COLS = [
+        ("Tray #", 2, "w", "link"), ("Sample", 3, "w", "text"),
+        ("Incubator", 2, "w", "muted"), ("Weight Kg", 1, "e", "num"),
+        ("Live/Kg", 1, "e", "num"), ("Parasite", 1, "e", "num"),
+        ("Chalk", 1, "e", "num"), ("Start", 2, "w", "text"),
+        ("Release", 2, "w", "text"), ("Cool", 1, "e", "num"),
+        ("Status", 2, "c", "badge"),
+    ]
+    _TRAY_STATUS_COLOR = {"active": BLUE, "cooled": "#06B6D4",
+                          "released": GREEN, "removed": FAINT}
+    _TRAY_PAGE_SIZE = 150
+
     def _sort_tray_tree(self, col_idx: int):
-        tree = self._tray_tree
         if self._tray_sort_col == col_idx:
             self._tray_sort_asc = not self._tray_sort_asc
         else:
             self._tray_sort_col = col_idx
             self._tray_sort_asc = True
+        self._tray_sort_and_render()
 
-        # Update heading arrows
-        cols = ("Tray #", "Sample", "Incubator", "Weight (Kg)", "Live Count",
-                "Parasite %", "Chalkbrood %", "Start Date", "Release Date",
-                "Cool Days", "Status")
-        for ci, col in enumerate(cols):
-            arrow = (" ↑" if self._tray_sort_asc else " ↓") if ci == col_idx else ""
-            tree.heading(col, text=col + arrow,
-                command=lambda c=ci: self._sort_tray_tree(c))
+    def _tray_prev_page(self):
+        if self._tray_page > 0:
+            self._tray_page -= 1
+            self._tray_render_page()
 
-        # Read values positionally — column names contain spaces/'%'/'#' which
-        # ttk does not handle reliably as set()/lookup identifiers.
-        rows = []
-        for iid in tree.get_children():
-            vals = tree.item(iid, "values")
-            sort_val = vals[col_idx] if col_idx < len(vals) else ""
-            tray_val = vals[0] if vals else ""
-            rows.append((sort_val, tray_val, iid))
+    def _tray_next_page(self):
+        import math as _m
+        pages = max(1, _m.ceil(len(self._tray_all) / self._TRAY_PAGE_SIZE))
+        if self._tray_page < pages - 1:
+            self._tray_page += 1
+            self._tray_render_page()
 
-        def _sort_key(val):
-            # Always return a 3-part tuple of consistent types so a column can
-            # mix numbers and text (e.g. sample names "402" and "B16") without
-            # raising "can't compare float to str". Group order: numbers, then
-            # text, then blanks ("—") last.
-            if val is None or val == "—":
+    def _tray_sort_and_render(self):
+        sc = self._tray_sort_col
+
+        def _key(row):
+            v = row["cells"][sc]
+            if v is None or v == "—":
                 return (2, 0.0, "")
             try:
-                return (0, float(val.replace("%", "").replace(",", "")), "")
+                return (0, float(str(v).replace("%", "").replace(",", "").replace("d", "")), "")
             except (ValueError, AttributeError):
-                return (1, 0.0, str(val).lower())
+                return (1, 0.0, str(v).lower())
+        self._tray_all.sort(key=lambda r: str(r["cells"][0]).lower())
+        self._tray_all.sort(key=_key, reverse=not self._tray_sort_asc)
+        self._tray_page = 0
+        self._tray_render_page()
 
-        # Primary sort by the clicked column (direction toggles); within ties,
-        # always order by tray number ascending so same-sample trays group nicely.
-        rows.sort(key=lambda x: _sort_key(x[1]))               # secondary: tray #
-        rows.sort(key=lambda x: _sort_key(x[0]), reverse=not self._tray_sort_asc)
-        for idx, (_, _, iid) in enumerate(rows):
-            tree.move(iid, "", idx)
+    def _tray_toggle_sel(self, tid: int):
+        if tid in self._tray_sel:
+            self._tray_sel.discard(tid)
+        else:
+            self._tray_sel.add(tid)
+        rf = self._tray_row_frames.get(tid)
+        if rf and rf.winfo_exists():
+            rf.configure(fg_color="#26374F" if tid in self._tray_sel else rf._base_bg)
+        self._tray_sel_lbl.configure(
+            text=f"{len(self._tray_sel)} selected" if self._tray_sel else "")
+
+    def _tray_render_page(self):
+        import math as _m
+        scroll = self._tray_scroll
+        for w in scroll.winfo_children():
+            w.destroy()
+        self._tray_row_frames = {}
+
+        total = len(self._tray_all)
+        pages = max(1, _m.ceil(total / self._TRAY_PAGE_SIZE))
+        self._tray_page = max(0, min(self._tray_page, pages - 1))
+        start = self._tray_page * self._TRAY_PAGE_SIZE
+        page_rows = self._tray_all[start:start + self._TRAY_PAGE_SIZE]
+
+        # Header
+        hdr = ctk.CTkFrame(scroll, fg_color="transparent")
+        hdr.pack(fill="x", pady=(0, 2))
+        for ci, (lbl, wt, al, kind) in enumerate(self._TRAY_COLS):
+            hdr.columnconfigure(ci, weight=wt, uniform="tray")
+            arrow = (" ↑" if self._tray_sort_asc else " ↓") if ci == self._tray_sort_col else ""
+            ctk.CTkButton(
+                hdr, text=lbl + arrow, height=28, corner_radius=6,
+                anchor="w" if al == "w" else ("center" if al == "c" else "e"),
+                fg_color="transparent", hover_color=CARD2, text_color=GOLD,
+                font=("Segoe UI", 11, "bold"),
+                command=lambda c=ci: self._sort_tray_tree(c)
+            ).grid(row=0, column=ci, sticky="ew", padx=1)
+        ctk.CTkFrame(scroll, fg_color=BORDER2, height=1).pack(fill="x")
+
+        for i, row in enumerate(page_rows):
+            base_bg = PANEL if i % 2 == 0 else "#18222F"
+            sel = row["id"] in self._tray_sel
+            rf = ctk.CTkFrame(scroll, fg_color="#26374F" if sel else base_bg,
+                              corner_radius=0)
+            rf._base_bg = base_bg
+            rf.pack(fill="x")
+            self._tray_row_frames[row["id"]] = rf
+            for ci, (lbl, wt, al, kind) in enumerate(self._TRAY_COLS):
+                rf.columnconfigure(ci, weight=wt, uniform="tray")
+                v = row["cells"][ci]
+                if kind == "badge":
+                    scol = self._TRAY_STATUS_COLOR.get(row["status"], SUBTEXT)
+                    ctk.CTkLabel(rf, text=f" {v} ", font=("Segoe UI", 10, "bold"),
+                                 fg_color=_mix(scol, base_bg, 0.18), text_color=scol,
+                                 corner_radius=6).grid(row=0, column=ci, padx=8, pady=5)
+                else:
+                    col = LINK if kind == "link" else (
+                        SUBTEXT if kind == "muted" else
+                        ("#E5E7EB" if al == "e" else "#CBD5E1"))
+                    _label(rf, str(v), ("Segoe UI", 11), col,
+                           anchor="w" if al == "w" else "e"
+                           ).grid(row=0, column=ci, sticky="ew", padx=8, pady=5)
+            rf.bind("<Button-1>", lambda e, t=row["id"]: self._tray_toggle_sel(t))
+            rf.bind("<Double-1>", lambda e, t=row["id"]: self._open_tray_by_id(t))
+            for ch in rf.winfo_children():
+                ch.bind("<Button-1>", lambda e, t=row["id"]: self._tray_toggle_sel(t))
+                ch.bind("<Double-1>", lambda e, t=row["id"]: self._open_tray_by_id(t))
+
+        self._tray_page_lbl.configure(text=f"Page {self._tray_page + 1} of {pages}  ·  {total} trays")
+        self._tray_prev_btn.configure(state="normal" if self._tray_page > 0 else "disabled")
+        self._tray_next_btn.configure(state="normal" if self._tray_page < pages - 1 else "disabled")
+
+    def _open_tray_by_id(self, tid: int):
+        tray = db.get_tray_by_id(tid)
+        if tray:
+            self._open_tray_dialog(tray=tray)
 
     def _tray_years(self) -> list:
         """Distinct years present in tray Start Dates, newest first (as strings)."""
@@ -2058,18 +2358,6 @@ class IncubationApp(ctk.CTk):
         return [str(y) for y in sorted(years, reverse=True)]
 
     def _refresh_trays(self):
-        tree = self._tray_tree
-        tree.delete(*tree.get_children())
-        # Reset sort state on refresh
-        self._tray_sort_col = None
-        self._tray_sort_asc = True
-        cols = ("Tray #", "Sample", "Incubator", "Weight (Kg)", "Live Count",
-                "Parasite %", "Chalkbrood %", "Start Date", "Release Date",
-                "Cool Days", "Status")
-        for col in cols:
-            tree.heading(col, text=col,
-                command=lambda c=cols.index(col): self._sort_tray_tree(c))
-
         inc_id = self._flt_inc_map.get(self._flt_inc.get())
         _flt = self._flt_status.get()
         status = None if _flt == "All" else db.tray_status_value(_flt)
@@ -2089,9 +2377,10 @@ class IncubationApp(ctk.CTk):
                      if (lambda d: d is not None and str(d.year) == yr)(
                          _parse_date_loose(t.get("in_date")))]
 
-        # Build all row tuples first, then insert in one pass
-        rows = [
-            (str(t["id"]), (
+        self._tray_sel = set()
+        self._tray_all = [{
+            "id": t["id"], "status": t.get("status") or "active",
+            "cells": [
                 t["tray_number"],
                 t.get("sample_name") or "—",
                 t.get("incubator_name") or "—",
@@ -2103,11 +2392,8 @@ class IncubationApp(ctk.CTk):
                 t.get("out_date") or "—",
                 (lambda d: f"{d}d" if d is not None else "—")(cool_down_days(t)),
                 db.tray_status_label(t.get("status") or "active"),
-            ))
-            for t in trays
-        ]
-        for iid, values in rows:
-            tree.insert("", "end", iid=iid, values=values)
+            ]} for t in trays]
+        self._tray_sort_and_render()
 
         # Cool-down report: average over shown trays that have a cool-down value
         _durs = [d for d in (cool_down_days(t) for t in trays) if d is not None]
@@ -2118,31 +2404,20 @@ class IncubationApp(ctk.CTk):
         else:
             self._cooldown_lbl.configure(text="")
 
-    def _on_tray_double_click(self, event):
-        sel = self._tray_tree.selection()
-        if not sel:
-            return
-        tid = int(sel[0])
-        tray = db.get_tray_by_id(tid)
-        if tray:
-            self._open_tray_dialog(tray=tray)
-
     def _show_selected_qr(self):
-        sel = self._tray_tree.selection()
-        if not sel:
-            messagebox.showinfo("QR Code", "Select a tray first.")
+        if not self._tray_sel:
+            messagebox.showinfo("QR Code", "Click a tray to select it first.")
             return
-        tray = db.get_tray_by_id(int(sel[0]))
+        tray = db.get_tray_by_id(next(iter(self._tray_sel)))
         if tray:
             QRDialog(self, tray, port=self._qr_port)
 
     def _show_tray_history(self):
         """Show every season's record for the selected tray number."""
-        sel = self._tray_tree.selection()
-        if not sel:
-            messagebox.showinfo("History", "Select a tray first.", parent=self)
+        if not self._tray_sel:
+            messagebox.showinfo("History", "Click a tray to select it first.", parent=self)
             return
-        tray = db.get_tray_by_id(int(sel[0]))
+        tray = db.get_tray_by_id(next(iter(self._tray_sel)))
         if not tray:
             return
         tray_number = tray["tray_number"]
@@ -2172,6 +2447,7 @@ class IncubationApp(ctk.CTk):
                 h.get("out_date") or "—",
                 note or "—",
             ))
+        self._apply_zebra(tree, status_col=0)
 
     # ══════════════════════════════════════════════════════════════════════════
     #  TIMELINE VIEW
@@ -2206,15 +2482,14 @@ class IncubationApp(ctk.CTk):
     def _build_timeline_view(self) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(self._main, fg_color="transparent", corner_radius=0)
 
-        hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.pack(fill="x", padx=20, pady=(16, 4))
-        _label(hdr, "Calendar", FONT_H, GOLD).pack(side="left")
-        _btn(hdr, "📅 Export to Calendar", self._export_calendar,
-             fg=BLUE, hover="#1D4ED8", text_color="white", width=170).pack(side="right", padx=(8, 0))
-        _btn(hdr, "➕ Schedule Incubator", self._schedule_incubator,
-             fg=GREEN, hover="#15803D", text_color="white", width=180).pack(side="right", padx=(8, 0))
-        _btn(hdr, "Today", self._cal_today, fg=DK_GOLD, hover=GOLD,
-             text_color="black", width=70).pack(side="right", padx=(8, 0))
+        hdr = self._screen_header(frame, "Calendar",
+                                  "Incubation schedule & milestones")
+        _btn_primary(hdr, "+ Schedule Incubator", self._schedule_incubator,
+                     width=170).pack(side="right")
+        _btn_secondary(hdr, "Export to Calendar", self._export_calendar,
+                       width=150).pack(side="right", padx=8)
+        _btn_secondary(hdr, "Today", self._cal_today,
+                       width=75).pack(side="right")
 
         # Centered month navigation: ‹  Month Year  ›
         monthbar = ctk.CTkFrame(frame, fg_color="transparent")
@@ -2307,7 +2582,8 @@ class IncubationApp(ctk.CTk):
         today = date.today()
 
         # Outer card wraps the whole calendar for a cleaner framed look
-        cal_card = ctk.CTkFrame(container, fg_color=CARD, corner_radius=14)
+        cal_card = ctk.CTkFrame(container, fg_color=PANEL, corner_radius=14,
+                                border_width=1, border_color=BORDER2)
         cal_card.pack(fill="both", expand=True, padx=4, pady=(2, 6))
 
         grid = ctk.CTkFrame(cal_card, fg_color="transparent")
@@ -2330,7 +2606,8 @@ class IncubationApp(ctk.CTk):
             for c, d in enumerate(week):
                 in_month = (d.month == m)
                 is_today = (d == today)
-                cell_bg = "#243044" if is_today else ("#161E2C" if not in_month else CARD2)
+                cell_bg = "#1F2529" if is_today else \
+                          ("#101827" if not in_month else NESTED)
                 cell = ctk.CTkFrame(
                     grid, fg_color=cell_bg, corner_radius=8,
                     border_width=2 if is_today else 0,
@@ -2456,16 +2733,19 @@ class IncubationApp(ctk.CTk):
             n = 0
             for inc in db.get_incubators(include_hidden=False):
                 raw = (inc.get("incubation_start") or "").strip()
-                start = None if raw == "none" else (
-                    _parse_date_loose(raw) or self._inc_start_date(inc["id"]))
+                if raw == "none":
+                    # Explicitly removed — delete any events we created before
+                    for day, _label, _ in self._INC_MILESTONES:
+                        gc.delete(gcal_sync.make_event_id(inc["id"], day))
+                    continue
+                start = _parse_date_loose(raw) or self._inc_start_date(inc["id"])
+                if not start:
+                    continue  # never scheduled — skip entirely (no wasted calls)
                 for day, label, _ in self._INC_MILESTONES:
-                    eid = gcal_sync.make_event_id(inc["id"], day)
-                    if start:
-                        gc.upsert(eid, f"{inc['name']} — {label} (Day {day})",
-                                  start + timedelta(days=day - 1))
-                        n += 1
-                    else:
-                        gc.delete(eid)
+                    gc.upsert(gcal_sync.make_event_id(inc["id"], day),
+                              f"{inc['name']} — {label} (Day {day})",
+                              start + timedelta(days=day - 1))
+                    n += 1
             if notify or interactive:
                 self.after(0, lambda: messagebox.showinfo(
                     "Google Calendar", f"Synced {n} milestone events.", parent=self))
@@ -2581,21 +2861,22 @@ class IncubationApp(ctk.CTk):
     def _build_settings_view(self) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(self._main, fg_color="transparent", corner_radius=0)
 
-        hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.pack(fill="x", padx=20, pady=(16, 8))
-        _label(hdr, "Settings", FONT_H, GOLD).pack(side="left")
-        _btn(hdr, "Save Settings", self._save_settings,
-             fg=DK_GOLD, hover=GOLD, text_color="black", width=140).pack(side="right")
+        hdr = self._screen_header(frame, "Settings",
+                                  "Integrations & polling configuration")
+        _btn_primary(hdr, "Save Settings", self._save_settings,
+                     width=140).pack(side="right")
 
         scroll = ctk.CTkScrollableFrame(frame, fg_color="transparent")
         scroll.pack(fill="both", expand=True, padx=12, pady=4)
 
         def section(title):
-            f = ctk.CTkFrame(scroll, fg_color=CARD, corner_radius=10)
-            f.pack(fill="x", padx=4, pady=(8, 2))
-            _label(f, title, FONT_H, GOLD).pack(anchor="w", padx=14, pady=(10, 4))
+            f = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=12,
+                             border_width=1, border_color=BORDER2)
+            f.pack(fill="x", padx=4, pady=(8, 4))
+            _label(f, title, ("Segoe UI", 13, "bold"), GOLD).pack(
+                anchor="w", padx=18, pady=(14, 4))
             g = ctk.CTkFrame(f, fg_color="transparent")
-            g.pack(fill="x", padx=14, pady=(0, 12))
+            g.pack(fill="x", padx=18, pady=(0, 14))
             g.columnconfigure(1, weight=1)
             return g
 
@@ -2714,10 +2995,11 @@ class IncubationApp(ctk.CTk):
                                      sticky="w", padx=4, pady=(2, 4))
 
         # ── Data Storage ──────────────────────────────────────────────────────
-        dsf = ctk.CTkFrame(scroll, fg_color=CARD, corner_radius=10)
-        dsf.pack(fill="x", padx=4, pady=(8, 2))
-        _label(dsf, "Data Storage", FONT_H, GOLD).pack(
-            anchor="w", padx=14, pady=(10, 2))
+        dsf = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=12,
+                           border_width=1, border_color=BORDER2)
+        dsf.pack(fill="x", padx=4, pady=(8, 4))
+        _label(dsf, "Data Storage", ("Segoe UI", 13, "bold"), GOLD).pack(
+            anchor="w", padx=18, pady=(14, 2))
         _label(dsf,
                "Move the database to your Google Drive folder so data syncs\n"
                "between computers automatically. The app restarts after saving.",
@@ -2758,10 +3040,11 @@ class IncubationApp(ctk.CTk):
              fg=BORDER, hover=CARD2, width=180, height=30).pack(side="left")
 
         # ── Email Reports ─────────────────────────────────────────────────
-        ef = ctk.CTkFrame(scroll, fg_color=CARD, corner_radius=10)
-        ef.pack(fill="x", padx=4, pady=(8, 2))
-        _label(ef, "Email Reports", FONT_H, GOLD).pack(
-            anchor="w", padx=14, pady=(10, 2))
+        ef = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=12,
+                          border_width=1, border_color=BORDER2)
+        ef.pack(fill="x", padx=4, pady=(8, 4))
+        _label(ef, "Email Reports", ("Segoe UI", 13, "bold"), GOLD).pack(
+            anchor="w", padx=18, pady=(14, 2))
         _label(ef,
                "A daily summary is sent at 7 PM with 24h temps, inspections, batch progress and "
                "tomorrow's calendar.\nFor Gmail: use an App Password (Google Account › Security › "
@@ -3288,9 +3571,10 @@ class IncubationApp(ctk.CTk):
 
         unit = db.get_setting("temp_unit", "C")
 
-        # ── Top bar ──────────────────────────────────────────────────────────
-        topbar = ctk.CTkFrame(frame, fg_color=SIDEBAR, corner_radius=0)
-        topbar.pack(fill="x")
+        # ── Selector row (card) ──────────────────────────────────────────────
+        topbar = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=12,
+                              border_width=1, border_color=BORDER2)
+        topbar.pack(fill="x", padx=16, pady=(14, 6))
 
         _btn(topbar, "← Back", lambda: self.show_view("dashboard"),
              width=90, height=32, fg="transparent", hover=CARD,
@@ -3363,9 +3647,10 @@ class IncubationApp(ctk.CTk):
              width=110, height=32, fg=CARD2, hover=BORDER,
              text_color=TEXT).pack(side="right", padx=4, pady=8)
 
-        # ── Control row ───────────────────────────────────────────────────────
-        ctrl = ctk.CTkFrame(frame, fg_color=CARD, corner_radius=0)
-        ctrl.pack(fill="x")
+        # ── Mode + AC row (card) ──────────────────────────────────────────────
+        ctrl = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=12,
+                            border_width=1, border_color=BORDER2)
+        ctrl.pack(fill="x", padx=16, pady=(0, 6))
 
         _label(ctrl, "Temp Mode:", FONT_S, SUBTEXT).pack(side="left", padx=(16, 6), pady=8)
 
@@ -3437,7 +3722,8 @@ class IncubationApp(ctk.CTk):
         body.pack(fill="both", expand=True)
 
         # ── Temperature / Humidity Chart with time-range selector ────────────
-        chart_frame = ctk.CTkFrame(body, fg_color=CARD, corner_radius=10)
+        chart_frame = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=12,
+                                   border_width=1, border_color=BORDER2)
         chart_frame.pack(fill="x", padx=16, pady=(12, 8))
 
         _RANGES = [
@@ -3468,10 +3754,11 @@ class IncubationApp(ctk.CTk):
                 w.destroy()
             chart_title.configure(text=f"Last {label}")
 
-            # Highlight active button
+            # Highlight active button (spec: active gold, others #202B3D)
             for lbl, btn in _range_btns.items():
-                btn.configure(fg_color=GOLD if lbl == label else BORDER,
-                              text_color="black" if lbl == label else TEXT)
+                _on = (lbl == label)
+                btn.configure(fg_color=GOLD if _on else CARD2,
+                              text_color="#1A1206" if _on else SUBTEXT)
 
             if not HAS_MPL:
                 _label(chart_canvas_frame, "Install matplotlib to view chart.",
@@ -3554,10 +3841,10 @@ class IncubationApp(ctk.CTk):
             rl, rh = range_label, range_hours
             b = ctk.CTkButton(
                 btn_row, text=rl, width=52, height=26,
-                fg_color=GOLD if rl == "24H" else BORDER,
-                hover_color=CARD2,
-                text_color="black" if rl == "24H" else TEXT,
-                corner_radius=5, font=FONT_S,
+                fg_color=GOLD if rl == "24H" else CARD2,
+                hover_color=BORDER,
+                text_color="#1A1206" if rl == "24H" else SUBTEXT,
+                corner_radius=6, font=("Segoe UI", 10, "bold"),
                 command=lambda lbl=rl, hrs=rh: _draw_chart(hrs, lbl),
             )
             b.pack(side="left", padx=2)
@@ -3568,7 +3855,9 @@ class IncubationApp(ctk.CTk):
 
         # ── Tabs: Inspections / Batches / Trays / VOC ─────────────────────────
         # Tabs are built lazily — content is only created the first time each tab is selected.
-        tabs = ctk.CTkTabview(body, fg_color=CARD, corner_radius=8)
+        tabs = ctk.CTkTabview(body, fg_color=PANEL, corner_radius=12,
+                              segmented_button_selected_color=BLUE,
+                              segmented_button_selected_hover_color="#1D4ED8")
         tabs.pack(fill="both", expand=True, padx=16, pady=(4, 12))
 
         _tab_built: set = set()
@@ -4171,16 +4460,14 @@ class IncubationApp(ctk.CTk):
 
     def _bulk_set_status(self):
         """Change status on all currently selected trays in the Trays tab."""
-        sel = self._tray_tree.selection()
-        if not sel:
+        if not self._tray_sel:
             messagebox.showinfo("Set Status",
-                "Select one or more trays first.\n\n"
-                "Tip: click a row, then Ctrl+click or Shift+click to select more.",
+                "Click one or more trays to select them first.",
                 parent=self)
             return
 
         new_status = db.tray_status_value(self._bulk_status.get())
-        tray_ids   = [int(iid) for iid in sel]
+        tray_ids   = [int(t) for t in self._tray_sel]
 
         out_date           = None
         overwrite_out_date = False
@@ -4334,9 +4621,9 @@ class IncubationApp(ctk.CTk):
         """Return (label, fg, text_color) for an AC power toggle button."""
         power = self._sensibo.get_cached_power(device_id)
         if power is True:
-            return "● On", "#1C3A1C", GREEN
+            return "● On", "#243A34", GREEN_LT   # spec AC-on fill
         if power is False:
-            return "● Off", "#3A1C1C", "#EF4444"
+            return "● Off", "#3A2129", RED_LT     # spec AM/PM-pending-like red
         return "⏻ Power", CARD2, TEXT
 
     def _ac_temp_label(self, device_id: str) -> str:
@@ -4424,9 +4711,8 @@ class IncubationApp(ctk.CTk):
     def _build_inspections_view(self) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(self._main, fg_color="transparent", corner_radius=0)
 
-        hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.pack(fill="x", padx=20, pady=(16, 8))
-        _label(hdr, "Inspections Log", FONT_H, GOLD).pack(side="left")
+        hdr = self._screen_header(frame, "Inspections",
+                                  "Full inspection log across all units")
 
         # Legend
         leg = ctk.CTkFrame(hdr, fg_color="transparent")
@@ -4588,9 +4874,15 @@ class IncubationApp(ctk.CTk):
     # ══════════════════════════════════════════════════════════════════════════
 
     def _make_tree(self, parent, columns: tuple) -> ttk.Treeview:
-        frame = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=8)
+        frame = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=12,
+                             border_width=1, border_color=BORDER2)
         tree = ttk.Treeview(frame, columns=columns, show="headings",
                             style="Dark.Treeview")
+        # Zebra striping + status row tints (applied via _apply_zebra / on insert)
+        tree.tag_configure("evenrow", background=PANEL)
+        tree.tag_configure("oddrow",  background="#18222F")
+        tree.tag_configure("released", foreground=GREEN_LT)
+        tree.tag_configure("cooled",   foreground="#7DB0FF")
         vsb  = ttk.Scrollbar(frame, orient="vertical",   command=tree.yview)
         hsb  = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -4605,6 +4897,21 @@ class IncubationApp(ctk.CTk):
         tree._outer_frame = frame
         tree.pack = frame.pack  # forward pack to the outer frame
         return tree
+
+    def _apply_zebra(self, tree, status_col: int = None):
+        """Alternate row backgrounds; if status_col given, tint Released/Cooled
+        rows by status instead of the zebra background."""
+        for i, iid in enumerate(tree.get_children()):
+            tags = ["evenrow" if i % 2 == 0 else "oddrow"]
+            if status_col is not None:
+                vals = tree.item(iid, "values")
+                if status_col < len(vals):
+                    sv = str(vals[status_col]).strip().lower()
+                    if sv == "released":
+                        tags.append("released")
+                    elif sv == "cooled":
+                        tags.append("cooled")
+            tree.item(iid, tags=tags)
 
     def _refresh_current(self):
         if self._current_view:
@@ -4977,6 +5284,19 @@ class IncubationApp(ctk.CTk):
 
     # ── Status bar tick ───────────────────────────────────────────────────────
 
+    def _pulse_dots(self):
+        """Pulse the status dot on incubator cards that have an active alert."""
+        self._pulse_on = not self._pulse_on
+        alert_ids = getattr(self, "_alert_inc_ids", set())
+        dim = "#7A1F1A"   # spec exact dim dot
+        for iid, w in list(getattr(self, "_card_widgets", {}).items()):
+            dot = w.get("dot")
+            if dot is None or not dot.winfo_exists():
+                continue
+            if iid in alert_ids:
+                dot.configure(text_color=RED if self._pulse_on else dim)
+        self.after(750, self._pulse_dots)
+
     def _tick(self):
         self._status_govee.configure(
             text=f"Govee: {self._govee.status_label()}",
@@ -4992,6 +5312,13 @@ class IncubationApp(ctk.CTk):
             text=datetime.now().strftime("%Y-%m-%d  %H:%M"),
             text_color=SUBTEXT,
         )
+        # Sensibo status (green when a key is configured)
+        _has_sb = bool(db.get_setting("sensibo_api_key"))
+        self._status_sensibo.configure(
+            text="Sensibo: Ready" if _has_sb else "Sensibo: —",
+            text_color=(GREEN if _has_sb else FAINT))
+        self._status_refresh.configure(
+            text=f"Last refresh: {datetime.now().strftime('%H:%M')}", text_color=FAINT)
         self.after(30_000, self._tick)  # refresh every 30s
 
     # ── Live code reload ────────────────────────────────────────────────────────

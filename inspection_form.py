@@ -88,26 +88,30 @@ def make_status_badges(parent, incubator_id: int, on_click=None) -> ctk.CTkFrame
     row    = ctk.CTkFrame(parent, fg_color="transparent")
     pill_font = ("Segoe UI", 11, "bold")
 
-    for period, label, icon in (("morning", "AM", "🌅"), ("evening", "PM", "🌙")):
+    for period, label in (("morning", "AM"), ("evening", "PM")):
         done = status.get(period) == "done"
-        bg   = "#15803D" if done else "#B91C1C"      # green / red
-        hov  = "#16A34A" if done else "#DC2626"
-        fg   = "#FFFFFF"
-        sym  = "✓" if done else "•"
-        text = f"{icon} {label} {sym}"
+        # Spec: translucent fills with an accent ring, not solid loud colors
+        if done:
+            bg, hov, fg, bdr = "#22322C", "#294038", "#7CE08A", "#2E5A3E"
+            sym = "✓"
+        else:
+            bg, hov, fg, bdr = "#3A2129", "#48262E", "#FF6A57", "#5A2A2C"
+            sym = "•"
+        text = f"{label} {sym}"
 
         if on_click:
             ctk.CTkButton(
-                row, text=text, width=70, height=28,
+                row, text=text, width=64, height=28,
                 fg_color=bg, hover_color=hov, text_color=fg,
-                corner_radius=14, font=pill_font,
+                corner_radius=8, font=pill_font,
+                border_width=1, border_color=bdr,
                 command=lambda p=period: on_click(p),
             ).pack(side="left", padx=3)
         else:
             ctk.CTkLabel(
-                row, text=text, width=70, height=28,
+                row, text=text, width=64, height=28,
                 fg_color=bg, text_color=fg,
-                corner_radius=14, font=pill_font,
+                corner_radius=8, font=pill_font,
             ).pack(side="left", padx=3)
     return row
 
@@ -479,6 +483,9 @@ class InspectionsLogPanel(ctk.CTkFrame):
             background="#1A2E1A", foreground="#86EFAC")
         self._tree.tag_configure("bees",
             background="#1A2E2E", foreground="#67E8F9")
+        # Zebra striping for ordinary (non-flagged) rows
+        self._tree.tag_configure("evenrow", background="#151E2E")
+        self._tree.tag_configure("oddrow",  background="#18222F")
 
     # ── Data ─────────────────────────────────────────────────────────────────
 
@@ -512,7 +519,7 @@ class InspectionsLogPanel(ctk.CTkFrame):
                             reverse=self._sort_rev)
 
         self._tree.delete(*self._tree.get_children())
-        for r in rows:
+        for _i, r in enumerate(rows):
             ts  = (r.get("timestamp") or "")[:16].replace("T", " ")
             td  = r.get("temp_diff_c")
 
@@ -523,7 +530,7 @@ class InspectionsLogPanel(ctk.CTkFrame):
             elif r.get("bees_emerging"):
                 tag = ("bees",)
             else:
-                tag = ()
+                tag = ("evenrow",) if _i % 2 == 0 else ("oddrow",)
 
             def _yn(v):  return "Yes" if v else "No"
             def _f1(v):  return f"{v:.1f}" if v is not None else "—"
