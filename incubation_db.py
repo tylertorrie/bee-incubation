@@ -210,6 +210,7 @@ def init_db():
             ("gcal_credentials_path",   ""),
             ("gcal_calendar_id",        "primary"),
             ("gcal_enabled",            "0"),
+            ("voc_ingest_token",        ""),
             ("lbs_per_gal",             "2.2"),
             ("target_gals_per_tray",    "2.0"),
             ("qr_server_port",          "5151"),

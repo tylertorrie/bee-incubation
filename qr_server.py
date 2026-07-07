@@ -2242,38 +2242,75 @@ def _make_flask_app():
 
     @app.route("/reading", methods=["POST"])
     def esp32_reading():
+        """Ingest VOC reading(s). Backward-compatible with the single-reading
+        ESP32 format, and also accepts a batch for buffered Pi sync:
+
+          Single:  {"incubator_id":6,"position":"front","voc_ppm":0.42,"temp_c":21.3,"ts":"..."}
+          Batch:   {"incubator_id":6,"position":"front",
+                    "readings":[{"voc_ppm":0.42,"temp_c":21.3,"ts":"2026-07-06T12:00:00"}, ...]}
+
+        Optional token auth: if the 'voc_ingest_token' setting is non-empty,
+        the request must send a matching 'X-Ingest-Token' header.
+        """
         if not _voc_available:
             return jsonify({"error": "voc_db not available"}), 503
+
+        # Optional shared-token auth (open if no token configured)
+        _tok = (db.get_setting("voc_ingest_token", "") or "").strip()
+        if _tok and request.headers.get("X-Ingest-Token", "").strip() != _tok:
+            return jsonify({"error": "invalid ingest token"}), 401
+
         data = request.get_json(silent=True) or {}
         inc_id   = data.get("incubator_id")
         position = data.get("position", "front")
-        voc_ppm  = data.get("voc_ppm")
-        temp_c   = data.get("temp_c")
-        if inc_id is None or voc_ppm is None:
-            return jsonify({"error": "incubator_id and voc_ppm required"}), 400
+        if inc_id is None:
+            return jsonify({"error": "incubator_id required"}), 400
         try:
-            inc_id  = int(inc_id)
-            voc_ppm = float(voc_ppm)
-            temp_c  = float(temp_c) if temp_c is not None else None
+            inc_id = int(inc_id)
         except (ValueError, TypeError) as exc:
             return jsonify({"error": str(exc)}), 400
 
-        run = _vdb.get_active_run(inc_id)
+        # Normalise to a list of {voc_ppm, temp_c, ts, position?}
+        is_batch = isinstance(data.get("readings"), list)
+        if is_batch:
+            items = data["readings"]
+        else:
+            items = [{"voc_ppm": data.get("voc_ppm"),
+                      "temp_c":  data.get("temp_c"),
+                      "ts":      data.get("ts") or data.get("timestamp")}]
+        if not items:
+            return jsonify({"error": "no readings"}), 400
+
+        run    = _vdb.get_active_run(inc_id)
         run_id = run["id"] if run else None
-        _vdb.save_reading(inc_id, run_id, position, voc_ppm, temp_c)
+        snap   = _vdb.run_snapshot(run) if run else None
 
-        # Check thresholds and log alert if out of range
-        if run:
-            snap = _vdb.run_snapshot(run)
-            zone_key, zone_lbl, _ = _vdb.get_zone(voc_ppm, snap)
-            if zone_key not in ("ok", "no_data"):
-                msg = (f"{zone_lbl}: {position} sensor "
-                       f"{voc_ppm:.3f} ppm in {run['chemical_name']}")
-                _vdb.log_alert_event(inc_id, run_id, position, voc_ppm, zone_key, msg)
+        accepted = 0
+        for it in items:
+            try:
+                ppm = float(it.get("voc_ppm"))
+            except (ValueError, TypeError):
+                continue  # skip malformed rows, keep the rest of the batch
+            temp = it.get("temp_c")
+            try:
+                temp = float(temp) if temp is not None else None
+            except (ValueError, TypeError):
+                temp = None
+            pos = it.get("position") or position
+            ts  = it.get("ts")
+            _vdb.save_reading(inc_id, run_id, pos, ppm, temp, timestamp=ts)
+            accepted += 1
+            # Alert only for near-real-time single readings, not backfilled batches
+            if run and snap and not is_batch:
+                zone_key, zone_lbl, _ = _vdb.get_zone(ppm, snap)
+                if zone_key not in ("ok", "no_data"):
+                    msg = (f"{zone_lbl}: {pos} sensor {ppm:.3f} ppm "
+                           f"in {run['chemical_name']}")
+                    _vdb.log_alert_event(inc_id, run_id, pos, ppm, zone_key, msg)
 
-        if _on_update:
+        if accepted and _on_update:
             _on_update(None)
-        return jsonify({"ok": True, "run_id": run_id})
+        return jsonify({"ok": True, "run_id": run_id, "accepted": accepted})
 
     @app.route("/api/readings")
     def api_readings():

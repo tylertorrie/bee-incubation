@@ -1,0 +1,43 @@
+# Bee Incubation — ZI02 VOC sensor service configuration
+# Copy to /etc/vapsens/vapsens.conf and fill in the values, then:
+#   sudo systemctl restart vapsens
+#
+# This file is read by systemd (EnvironmentFile) — KEY=VALUE, no quotes, no spaces.
+
+# --- Required ---
+# Tailscale IP (or MagicDNS name) of the computer running the incubation app,
+# plus the QR-server port (default 5151). Find the app computer's Tailscale IP
+# with `tailscale ip -4` on that machine.
+APP_URL=http://100.x.y.z:5151
+
+# Which incubator this sensor is physically installed in (the app's incubator id).
+# Ask in the app / see the Incubators list. Example: Incubator 7 -> id 7.
+INCUBATOR_ID=7
+
+# --- Optional (sensible defaults if omitted) ---
+# Must match the app's Settings -> "voc_ingest_token". Leave blank if the app
+# has no token set (open ingest on the Tailscale network).
+INGEST_TOKEN=
+
+# Sensor slot in the app schema: front or back (single sensor -> front).
+POSITION=front
+
+# Friendly identifier for this sensor (defaults to the Pi hostname).
+SENSOR_ID=vapsens-zi02
+
+# Serial device and baud (defaults match the confirmed ZI02 wiring).
+SERIAL_PORT=/dev/serial0
+BAUD=9600
+
+# Averaging window (seconds) — one stored/synced reading per window.
+# Sensor streams ~1 Hz; 30s keeps the DB tidy while staying responsive.
+SAMPLE_SECONDS=30
+
+# How often to push buffered readings to the app (seconds).
+SYNC_SECONDS=15
+
+# Drop already-synced buffer rows older than this many days.
+PRUNE_DAYS=14
+
+# Local buffer database path (must be writable by the service user).
+BUFFER_DB=/var/lib/vapsens/buffer.db

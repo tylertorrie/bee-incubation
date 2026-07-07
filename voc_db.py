@@ -326,14 +326,17 @@ def run_snapshot(run: dict) -> dict:
 # ── Readings ──────────────────────────────────────────────────────────────────
 
 def save_reading(incubator_id: int, run_id: int | None,
-                 position: str, voc_ppm: float, temp_c: float | None = None):
+                 position: str, voc_ppm: float, temp_c: float | None = None,
+                 timestamp: str | None = None):
+    """Insert one reading. `timestamp` (ISO string) preserves the original
+    reading time for buffered/late-synced data; defaults to now()."""
     with get_conn() as conn:
         conn.execute("""
             INSERT INTO voc_readings
               (incubator_id, run_id, position, timestamp, voc_ppm, temp_c)
             VALUES (?,?,?,?,?,?)""",
             (incubator_id, run_id, position,
-             datetime.now().isoformat(), voc_ppm, temp_c))
+             timestamp or datetime.now().isoformat(), voc_ppm, temp_c))
 
 
 def get_run_readings(run_id: int) -> list:

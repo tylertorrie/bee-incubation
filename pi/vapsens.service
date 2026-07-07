@@ -1,0 +1,20 @@
+[Unit]
+Description=ZI02 VOC sensor -> Bee Incubation app
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=incu1nvap
+Group=dialout
+EnvironmentFile=/etc/vapsens/vapsens.conf
+ExecStart=/usr/bin/python3 /opt/vapsens/zi02_service.py
+Restart=always
+RestartSec=5
+# Buffer directory (BUFFER_DB defaults under here); systemd creates it.
+StateDirectory=vapsens
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
