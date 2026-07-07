@@ -66,7 +66,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.32.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.34.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -1118,12 +1118,14 @@ class IncubationApp(ctk.CTk):
             g = self._load_icon(key, "grey")
             gold = self._load_icon(key, "gold")
             self._nav_icons[key] = {"grey": g, "gold": gold}
+            _cmd = self._open_incubators if key == "incubators" \
+                else (lambda k=key: self.show_view(k))
             btn = ctk.CTkButton(
                 sb, text="  " + label, anchor="w", height=40,
                 image=g, compound="left",
                 fg_color="transparent", hover_color="#1A2436",
                 text_color=SUBTEXT, font=("Segoe UI", 12), corner_radius=9,
-                command=lambda k=key: self.show_view(k)
+                command=_cmd
             )
             btn.pack(fill="x", padx=10, pady=2)
             self._nav_btns[key] = btn
@@ -1174,13 +1176,71 @@ class IncubationApp(ctk.CTk):
 
     # ── Navigation ────────────────────────────────────────────────────────────
 
+    def _after_inc_delete(self):
+        """After deleting an incubator, forget the stale selection and leave."""
+        self._detail_inc = {}
+        self.show_view("dashboard")
+
+    def _manual_poll_incubator(self, inc: dict, btn=None):
+        """Force an immediate Govee reading for one incubator (background thread)."""
+        if not (inc.get("govee_device_id") and inc.get("govee_sku")):
+            messagebox.showinfo("Pull Reading",
+                "No Govee device is configured for this incubator.\n"
+                "Set the Govee Device ID and SKU in Edit Setup first.", parent=self)
+            return
+        if btn is not None:
+            btn.configure(text="Polling…", state="disabled")
+        iid = inc["id"]
+
+        def _work():
+            try:
+                temp_c, humidity = self._govee.poll_incubator(inc)
+                err = None
+            except Exception as exc:
+                temp_c = humidity = None
+                err = str(exc)
+
+            def _done():
+                try:
+                    if btn is not None and btn.winfo_exists():
+                        btn.configure(text="⟳ Pull Reading", state="normal")
+                    if temp_c is not None and humidity is not None:
+                        tc = govee_mod.to_celsius(temp_c)
+                        db.save_reading(iid, tc, humidity)
+                        self._refresh_alert_badge()
+                        # Rebuild the detail view (safely) to show the new reading
+                        if self._current_view == "inc_detail":
+                            self._refresh_inc_detail()
+                    else:
+                        messagebox.showwarning("Pull Reading",
+                            f"Couldn't read the sensor right now.\n"
+                            f"{err or self._govee.status_label()}", parent=self)
+                except Exception as exc:
+                    messagebox.showerror("Pull Reading",
+                        f"Error updating after poll:\n{exc}", parent=self)
+            self.after(0, _done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _open_incubators(self):
+        """Incubators tab opens the per-unit detail view (matches the README)."""
+        if not self._detail_inc:
+            incs = db.get_incubators(include_hidden=True)
+            if incs:
+                self._detail_inc = incs[0]
+            else:
+                self._open_incubator_dialog()   # no units yet → add one
+                return
+        self.show_view("inc_detail")
+
     def show_view(self, name: str):
         for v in self._views.values():
             v.pack_forget()
-        # inc_detail is not a top-level nav item — keep the previous nav btn highlighted
-        if name != "inc_detail":
+        # The detail view lives under the "Incubators" nav item — highlight it there
+        _hl = "incubators" if name == "inc_detail" else name
+        if True:
             for k, btn in self._nav_btns.items():
-                active = (k == name)
+                active = (k == _hl)
                 _ico = self._nav_icons.get(k, {})
                 btn.configure(
                     fg_color="#25281E" if active else "transparent",   # spec exact
@@ -3635,17 +3695,24 @@ class IncubationApp(ctk.CTk):
             on_click=lambda p, i=fresh: self._open_inspection_form(i)).pack(
             side="left", padx=12, pady=8)
 
-        _btn(topbar, "Inspect Now", lambda i=fresh: self._open_inspection_form(i),
-             width=110, height=32, fg=BLUE, hover="#1D4ED8",
-             text_color="white").pack(side="right", padx=(0, 12), pady=8)
+        _btn_primary(topbar, "Inspect Now",
+                     lambda i=fresh: self._open_inspection_form(i),
+                     width=110).pack(side="right", padx=(0, 12), pady=8)
 
-        _btn(topbar, "⚙ Edit Setup",
+        _btn_secondary(topbar, "⚙ Edit Setup",
              lambda i=fresh: IncubatorDialog(
                  self, i,
                  on_save=lambda: self._refresh_current(),
-                 on_delete=lambda: self.show_view("dashboard")),
-             width=110, height=32, fg=CARD2, hover=BORDER,
-             text_color=TEXT).pack(side="right", padx=4, pady=8)
+                 on_delete=self._after_inc_delete),
+             width=110).pack(side="right", padx=4, pady=8)
+
+        _pull_btn = _btn_secondary(topbar, "⟳ Pull Reading", None, width=130)
+        _pull_btn.configure(command=lambda i=fresh, b=_pull_btn: self._manual_poll_incubator(i, b))
+        _pull_btn.pack(side="right", padx=4, pady=8)
+
+        _btn_secondary(topbar, "+ Add",
+                       lambda: self._open_incubator_dialog(),
+                       width=80).pack(side="right", padx=4, pady=8)
 
         # ── Mode + AC row (card) ──────────────────────────────────────────────
         ctrl = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=12,
@@ -3868,6 +3935,11 @@ class IncubationApp(ctk.CTk):
 
         def _build_batches_tab():
             bt = tabs.tab("Batches")
+            _bhdr = ctk.CTkFrame(bt, fg_color="transparent")
+            _bhdr.pack(fill="x", padx=8, pady=(8, 2))
+            _btn_secondary(_bhdr, "+ New Batch",
+                lambda i=fresh["id"]: self._open_batch_dialog(incubator_id=i),
+                width=120).pack(side="right")
             bscroll = ctk.CTkScrollableFrame(bt, fg_color="transparent")
             bscroll.pack(fill="both", expand=True)
             batches = db.get_batches(incubator_id=fresh["id"])
@@ -3875,8 +3947,13 @@ class IncubationApp(ctk.CTk):
                 for batch in batches:
                     bf = ctk.CTkFrame(bscroll, fg_color=CARD2, corner_radius=8)
                     bf.pack(fill="x", pady=4, padx=4)
+                    _brow = ctk.CTkFrame(bf, fg_color="transparent")
+                    _brow.pack(fill="x", padx=10, pady=(8, 0))
                     bname = batch.get("name") or f"Batch {batch['id']}"
-                    _label(bf, bname, FONT_B, GOLD).pack(anchor="w", padx=10, pady=(8, 2))
+                    _label(_brow, bname, FONT_B, GOLD).pack(side="left")
+                    _btn_secondary(_brow, "Edit",
+                        lambda b=batch: self._open_batch_dialog(batch=b),
+                        width=64).pack(side="right")
                     for fld, lbl in calc.BATCH_EVENT_FIELDS:
                         val = batch.get(fld)
                         if val:
