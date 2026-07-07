@@ -13,20 +13,24 @@ import customtkinter as ctk
 
 import inspection_db as idb
 
-# ── Palette (matches main app) ────────────────────────────────────────────────
+# ── Palette (matches main app's design-handoff theme) ─────────────────────────
 GOLD    = "#FFD700"
 DK_GOLD = "#B8860B"
 GREEN   = "#4CAF50"
 TEAL    = "#10B981"
 AMBER   = "#F59E0B"
-RED     = "#EF4444"
+RED     = "#FF3B30"
 BLUE    = "#3B82F6"
-CARD    = "#1F2937"
-CARD2   = "#263347"
-BORDER  = "#374151"
+LINK    = "#93C5FD"
+PANEL   = "#151E2E"   # section / table panel
+CARD    = "#1B2536"   # incubator-card equivalent
+CARD2   = "#202B3D"   # inset tiles / inputs
+BORDER  = "#374151"   # strong border
+BORDER2 = "#232F42"   # subtle border
 TEXT    = "#F3F4F6"
 SUBTEXT = "#9CA3AF"
-SIDEBAR = "#111827"
+FAINT   = "#6B7280"
+BARBG   = "#0B1220"
 ORANGE  = "#FF9800"
 
 FONT_H = ("Segoe UI", 13, "bold")
@@ -73,45 +77,46 @@ def _check(parent, text: str, initial: bool = False) -> ctk.CTkCheckBox:
 
 # ── Public badge helper ───────────────────────────────────────────────────────
 
-def make_status_badges(parent, incubator_id: int, on_click=None) -> ctk.CTkFrame:
+def make_status_badges(parent, incubator_id: int, on_click=None, style: str = "chip") -> ctk.CTkFrame:
     """
     Return a small frame with Morning / Evening inspection pills.
 
     Colours:
-      green ✓  — that inspection has been done today
-      red   •  — not done yet (default)
+      green — that inspection has been done today
+      red   — not done yet (default)
+
+    style="chip" (default): small rectangular chip — used on dashboard cards.
+    style="pill": fully-rounded pill — used on the Incubators detail selector row.
 
     If `on_click` is given, the pills become buttons; clicking one calls
     on_click(period) where period is "morning" or "evening".
     """
     status = idb.get_inspection_status(incubator_id)
     row    = ctk.CTkFrame(parent, fg_color="transparent")
-    pill_font = ("Segoe UI", 11, "bold")
+
+    if style == "pill":
+        w, h, radius, font = 54, 30, 15, ("Segoe UI", 11, "bold")
+    else:
+        w, h, radius, font = 64, 28, 6, ("Segoe UI", 10, "bold")
 
     for period, label in (("morning", "AM"), ("evening", "PM")):
         done = status.get(period) == "done"
-        # Spec: translucent fills with an accent ring, not solid loud colors
-        if done:
-            bg, hov, fg, bdr = "#22322C", "#294038", "#7CE08A", "#2E5A3E"
-            sym = "✓"
-        else:
-            bg, hov, fg, bdr = "#3A2129", "#48262E", "#FF6A57", "#5A2A2C"
-            sym = "•"
-        text = f"{label} {sym}"
+        # done:  color #7CE08A  bg rgba(76,175,80,.16/.24) -> solid
+        # pend:  color #FF4433  bg rgba(255,59,48,.2/.24)  -> solid
+        bg, fg = ("#22322C", "#7CE08A") if done else ("#3A2129", "#FF4433")
 
         if on_click:
             ctk.CTkButton(
-                row, text=text, width=64, height=28,
-                fg_color=bg, hover_color=hov, text_color=fg,
-                corner_radius=8, font=pill_font,
-                border_width=1, border_color=bdr,
+                row, text=label, width=w, height=h,
+                fg_color=bg, hover_color=bg, text_color=fg,
+                corner_radius=radius, font=font, border_width=0,
                 command=lambda p=period: on_click(p),
             ).pack(side="left", padx=3)
         else:
             ctk.CTkLabel(
-                row, text=text, width=64, height=28,
+                row, text=label, width=w, height=h,
                 fg_color=bg, text_color=fg,
-                corner_radius=8, font=pill_font,
+                corner_radius=radius, font=font,
             ).pack(side="left", padx=3)
     return row
 
@@ -362,9 +367,9 @@ class InspectionsLogPanel(ctk.CTkFrame):
         "Notes":       "notes",
     }
     _COL_W = {
-        "Date / Time": 145, "Incubator": 120, "Period": 75,
+        "Date / Time": 150, "Incubator": 120, "Period": 75,
         "Thermo °C": 85, "Govee °C": 85, "Δ Temp": 68,
-        "Heat Pumps": 92, "Parasites": 82, "Bees": 62,
+        "Heat Pumps": 110, "Parasites": 90, "Bees": 62,
         "Fans": 62, "Lights": 62, "Notes": 220,
     }
 
@@ -382,7 +387,8 @@ class InspectionsLogPanel(ctk.CTkFrame):
 
     def _build(self):
         # Filter bar
-        fbar = ctk.CTkFrame(self, fg_color=CARD, corner_radius=8)
+        fbar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10,
+                            border_width=1, border_color=BORDER2)
         fbar.pack(fill="x", padx=8, pady=(8, 4))
 
         _lbl(fbar, "Filter:", FONT_S, SUBTEXT).pack(side="left", padx=(10, 4), pady=7)
@@ -415,15 +421,19 @@ class InspectionsLogPanel(ctk.CTkFrame):
         self._count_lbl = _lbl(fbar, "", FONT_S, SUBTEXT)
         self._count_lbl.pack(side="left", padx=10)
 
-        # Export buttons
+        # Export buttons (Excel = primary gold, CSV = secondary — matches spec)
         _btn(fbar, "Export CSV", self._export_csv,
-             fg=BORDER, hover=CARD2, width=105, height=26).pack(
-             side="right", padx=4, pady=7)
+             fg=CARD2, hover=BORDER, width=105, height=28).pack(
+             side="right", padx=4, pady=6)
         try:
             import openpyxl as _  # noqa
-            _btn(fbar, "Export Excel", self._export_xlsx,
-                 fg=BORDER, hover=CARD2, width=115, height=26).pack(
-                 side="right", padx=4, pady=7)
+            ctk.CTkButton(
+                fbar, text="Export Excel", command=self._export_xlsx,
+                width=115, height=28, corner_radius=8,
+                fg_color="#C79114", hover_color="#E0A81A", text_color="#1A1206",
+                font=("Segoe UI", 11, "bold"),
+                border_width=1, border_color=DK_GOLD,
+            ).pack(side="right", padx=4, pady=6)
         except ImportError:
             pass
 
@@ -433,28 +443,34 @@ class InspectionsLogPanel(ctk.CTkFrame):
         # Bottom action row
         btm = ctk.CTkFrame(self, fg_color="transparent")
         btm.pack(fill="x", padx=8, pady=(4, 8))
-        _btn(btm, "Delete Selected", self._delete_selected,
-             fg="#4B0000", hover=RED, width=140, height=26).pack(side="right", padx=4)
+        ctk.CTkButton(
+            btm, text="Delete Selected", command=self._delete_selected,
+            width=140, height=28, corner_radius=8,
+            fg_color="#2A1E20", hover_color="#3A2224", text_color="#FF6A57",
+            font=("Segoe UI", 11, "bold"),
+            border_width=1, border_color="#5A2A2C",
+        ).pack(side="right", padx=4)
         _btn(btm, "Refresh", self.refresh,
-             fg=BORDER, hover=CARD2, width=100, height=26).pack(side="right", padx=4)
+             fg=CARD2, hover=BORDER, width=100, height=28).pack(side="right", padx=4)
 
     def _build_tree(self):
-        outer = ctk.CTkFrame(self, fg_color="transparent")
+        outer = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10,
+                             border_width=1, border_color=BORDER2)
         outer.pack(fill="both", expand=True, padx=8, pady=2)
 
         # Ensure treeview style exists
         style = ttk.Style()
         try:
             style.configure("Dark.Treeview",
-                background=CARD, foreground=TEXT,
-                fieldbackground=CARD, borderwidth=0,
+                background=PANEL, foreground="#CBD5E1",
+                fieldbackground=PANEL, borderwidth=0,
                 rowheight=26, font=("Segoe UI", 10))
             style.configure("Dark.Treeview.Heading",
-                background=SIDEBAR, foreground=GOLD,
+                background=PANEL, foreground=GOLD,
                 relief="flat", font=("Segoe UI", 10, "bold"))
             style.map("Dark.Treeview",
-                background=[("selected", "#3B4F6B")],
-                foreground=[("selected", TEXT)])
+                background=[("selected", "#22314A")],
+                foreground=[("selected", LINK)])
         except Exception:
             pass
 

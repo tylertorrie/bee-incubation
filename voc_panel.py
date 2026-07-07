@@ -26,20 +26,23 @@ try:
 except ImportError:
     HAS_MPL = False
 
-# ── Colours (match main app palette) ─────────────────────────────────────────
+# ── Colours (match main app's design-handoff theme) ──────────────────────────
 GOLD    = "#FFD700"
 DK_GOLD = "#B8860B"
 GREEN   = "#10B981"
 AMBER   = "#F59E0B"
-RED     = "#EF4444"
+RED     = "#FF3B30"
 BLUE    = "#3B82F6"
 TEAL    = "#06B6D4"
-CARD    = "#1F2937"
-CARD2   = "#263347"
+PANEL   = "#151E2E"
+CARD    = "#1B2536"
+CARD2   = "#202B3D"
 BORDER  = "#374151"
+BORDER2 = "#232F42"
 TEXT    = "#F3F4F6"
 SUBTEXT = "#9CA3AF"
-SIDEBAR = "#111827"
+FAINT   = "#6B7280"
+BARBG   = "#0B1220"
 ORANGE  = "#FF9800"
 
 FONT_H = ("Segoe UI", 13, "bold")
@@ -82,7 +85,8 @@ class NewRunDialog(ctk.CTkToplevel):
         _lbl(self, "Start New VOC Monitoring Run", FONT_H, GOLD).pack(
             padx=20, pady=(16, 4), anchor="w")
 
-        f = ctk.CTkFrame(self, fg_color=CARD, corner_radius=10)
+        f = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=12,
+                         border_width=1, border_color=BORDER2)
         f.pack(fill="x", padx=16, pady=8)
         f.columnconfigure(1, weight=1)
 
@@ -318,7 +322,8 @@ class VOCPanel(ctk.CTkFrame):
 
     def _build(self):
         # Run bar (top)
-        self._run_bar = ctk.CTkFrame(self, fg_color=CARD, corner_radius=8)
+        self._run_bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10,
+                                     border_width=1, border_color=BORDER2)
         self._run_bar.pack(fill="x", padx=8, pady=(8, 4))
         self._run_info_lbl = _lbl(self._run_bar, "No active run", FONT_B, SUBTEXT)
         self._run_info_lbl.pack(side="left", padx=12, pady=6)
@@ -327,12 +332,16 @@ class VOCPanel(ctk.CTkFrame):
 
         rb = ctk.CTkFrame(self._run_bar, fg_color="transparent")
         rb.pack(side="right", padx=8, pady=6)
-        _btn(rb, "New Run",  self._new_run,  fg=DK_GOLD, hover=GOLD, tc="black",
-             width=90, height=28).pack(side="right", padx=3)
+        ctk.CTkButton(
+            rb, text="New Run", command=self._new_run, width=90, height=28,
+            corner_radius=8, fg_color="#C79114", hover_color="#E0A81A",
+            text_color="#1A1206", font=("Segoe UI", 11, "bold"),
+            border_width=1, border_color=DK_GOLD,
+        ).pack(side="right", padx=3)
         self._end_btn = _btn(rb, "End Run", self._end_run,
-                             fg=BORDER, hover=CARD2, width=85, height=28)
+                             fg=CARD2, hover=BORDER, width=85, height=28)
         self._end_btn.pack(side="right", padx=3)
-        _btn(rb, "Presets", self._open_presets, fg=BORDER, hover=CARD2,
+        _btn(rb, "Presets", self._open_presets, fg=CARD2, hover=BORDER,
              width=80, height=28).pack(side="right", padx=3)
 
         # Summary cards
@@ -350,7 +359,8 @@ class VOCPanel(ctk.CTkFrame):
             card.pack(side="left", expand=True, fill="x", padx=4)
 
         # Chart area
-        self._chart_outer = ctk.CTkFrame(self, fg_color=CARD, corner_radius=10)
+        self._chart_outer = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=12,
+                                         border_width=1, border_color=BORDER2)
         self._chart_outer.pack(fill="both", expand=True, padx=8, pady=4)
 
         if HAS_MPL:
@@ -399,8 +409,9 @@ class VOCPanel(ctk.CTkFrame):
     # ── Chart initialisation ──────────────────────────────────────────────────
 
     def _init_chart(self):
-        self._fig = Figure(figsize=(6, 2.8), facecolor="#111827")
+        self._fig = Figure(figsize=(6, 2.8), facecolor=PANEL)
         self._ax  = self._fig.add_subplot(111)
+        self._ax.set_facecolor(PANEL)
         self._fig.subplots_adjust(left=0.08, right=0.97, top=0.92, bottom=0.14)
         self._canvas = FigureCanvasTkAgg(self._fig, master=self._chart_outer)
         self._canvas.get_tk_widget().pack(fill="both", expand=True, padx=4, pady=4)

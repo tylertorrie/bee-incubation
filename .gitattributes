@@ -1,0 +1,4 @@
+pi/*.py text eol=lf
+pi/*.service text eol=lf
+pi/*.example text eol=lf
+pi/*.md text eol=lf

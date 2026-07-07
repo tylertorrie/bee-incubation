@@ -66,7 +66,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.34.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.40.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -2108,13 +2108,13 @@ class IncubationApp(ctk.CTk):
             return
         names = [d[0] for d in data][::-1]
         vals  = [d[1] for d in data][::-1]
-        fig = Figure(figsize=(9, max(2.0, 0.34 * len(names) + 0.5)), facecolor="#1F2937")
+        fig = Figure(figsize=(9, max(2.0, 0.34 * len(names) + 0.5)), facecolor=PANEL)
         ax = fig.add_subplot(111)
-        ax.set_facecolor("#1F2937")
+        ax.set_facecolor(PANEL)
         bars = ax.barh(names, vals, color=color)
         ax.tick_params(colors="#9CA3AF", labelsize=8)
         for spine in ax.spines.values():
-            spine.set_edgecolor("#374151")
+            spine.set_edgecolor(BORDER2)
         xmax = max(vals) if vals else 0
         ax.set_xlim(0, xmax * 1.15 if xmax else 1)
         for b, v in zip(bars, vals):
@@ -3631,16 +3631,15 @@ class IncubationApp(ctk.CTk):
 
         unit = db.get_setting("temp_unit", "C")
 
-        # ── Selector row (card) ──────────────────────────────────────────────
-        topbar = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=12,
-                              border_width=1, border_color=BORDER2)
-        topbar.pack(fill="x", padx=16, pady=(14, 6))
+        # ── Screen header (title + subtitle, actions on the right) ────────────
+        self._detail_hdr = self._screen_header(
+            frame, "Incubators", "Per-unit detail & inspection history")
 
-        _btn(topbar, "← Back", lambda: self.show_view("dashboard"),
-             width=90, height=32, fg="transparent", hover=CARD,
-             text_color=SUBTEXT).pack(side="left", padx=8, pady=8)
+        # ── Selector row (card) — exact prototype values ───────────────────────
+        topbar = ctk.CTkFrame(frame, fg_color="#151E2E", corner_radius=12,
+                              border_width=1, border_color="#232F42")
+        topbar.pack(fill="x", padx=16, pady=(2, 6))
 
-        # Incubator switcher: ‹ prev · name dropdown · next ›
         _nav_list = db.get_incubators()  # visible incubators, in display order
         _cur_idx  = next((i for i, x in enumerate(_nav_list)
                           if x["id"] == fresh["id"]), 0)
@@ -3649,25 +3648,22 @@ class IncubationApp(ctk.CTk):
             if _nav_list:
                 self._show_inc_detail(_nav_list[idx % len(_nav_list)])
 
-        _btn(topbar, "‹", lambda: _go_to(_cur_idx - 1),
-             width=34, height=32, fg=CARD, hover=CARD2, text_color=GOLD).pack(
-             side="left", padx=(4, 2), pady=8)
+        ctk.CTkButton(
+            topbar, text="‹", command=lambda: _go_to(_cur_idx - 1),
+            width=28, height=28, corner_radius=7,
+            fg_color="#1F2937", hover_color="#28374D", text_color="#CBD5E1",
+            font=("Segoe UI", 13),
+        ).pack(side="left", padx=(16, 10), pady=12)
+        _label(topbar, fresh["name"], ("Segoe UI", 15, "bold"), "#F3F4F6").pack(side="left")
+        ctk.CTkButton(
+            topbar, text="›", command=lambda: _go_to(_cur_idx + 1),
+            width=28, height=28, corner_radius=7,
+            fg_color="#1F2937", hover_color="#28374D", text_color="#CBD5E1",
+            font=("Segoe UI", 13),
+        ).pack(side="left", padx=10, pady=12)
 
-        _name_map = {x["name"]: i for i, x in enumerate(_nav_list)}
-        _name_var = ctk.StringVar(value=fresh["name"])
-        _name_dd  = ctk.CTkOptionMenu(
-            topbar, variable=_name_var, values=list(_name_map.keys()),
-            width=190, height=32, font=FONT_H,
-            fg_color=CARD, button_color=CARD2, button_hover_color=BORDER,
-            text_color=GOLD, dropdown_fg_color=CARD,
-            dropdown_text_color=TEXT, dropdown_hover_color=CARD2,
-            command=lambda name: _go_to(_name_map.get(name, _cur_idx)),
-        )
-        _name_dd.pack(side="left", padx=2, pady=8)
-
-        _btn(topbar, "›", lambda: _go_to(_cur_idx + 1),
-             width=34, height=32, fg=CARD, hover=CARD2, text_color=GOLD).pack(
-             side="left", padx=(2, 16), pady=8)
+        ctk.CTkFrame(topbar, fg_color="#263347", width=1, height=22).pack(
+            side="left", padx=4)
 
         reading = self._govee.get_last(fresh["id"])
         if not reading:
@@ -3676,113 +3672,129 @@ class IncubationApp(ctk.CTk):
 
         if reading.get("temp_c") is not None:
             t_min, t_max = calc.get_temp_range(fresh)
-            t_col = SUBTEXT if t_min is None else (
-                GREEN if t_min <= reading["temp_c"] <= t_max else RED)
-            ctk.CTkLabel(topbar,
-                text=calc.format_temp(reading["temp_c"], unit),
-                font=("Segoe UI", 13, "bold"), text_color=t_col,
-                fg_color=CARD, corner_radius=6, padx=10, height=32,
-            ).pack(side="left", padx=4, pady=8)
-            ctk.CTkLabel(topbar,
-                text=f"{reading['humidity']:.0f}% RH",
-                font=("Segoe UI", 13, "bold"), text_color=TEXT,
-                fg_color=CARD, corner_radius=6, padx=10, height=32,
-            ).pack(side="left", padx=4, pady=8)
+            _gt, _ = db.get_mode_goals(fresh.get("temp_mode", "incubation"))
+            _tc = reading["temp_c"]
+            if _gt is not None:
+                _d = abs(_tc - _gt)
+                t_col = GREEN if _d <= 1 else (ORANGE if _d <= 3 else RED)
+            elif t_min is not None:
+                t_col = GREEN if t_min <= _tc <= t_max else RED
+            else:
+                t_col = "#6B7280"
+            _label(topbar, calc.format_temp(_tc, unit),
+                   ("Segoe UI", 20, "bold"), t_col).pack(side="left", padx=(14, 2))
+            _label(topbar, f"{reading['humidity']:.0f}% RH",
+                   ("Segoe UI", 20, "bold"), GOLD).pack(side="left", padx=(2, 0))
 
-        # Inspection pills (click to open the inspection report)
+        # AM/PM pills (pill shape, translucent fills, no border — spec exact)
         make_status_badges(
-            topbar, fresh["id"],
+            topbar, fresh["id"], style="pill",
             on_click=lambda p, i=fresh: self._open_inspection_form(i)).pack(
-            side="left", padx=12, pady=8)
+            side="right", padx=(0, 14), pady=8)
 
-        _btn_primary(topbar, "Inspect Now",
+        # Actions live in the screen header (right side)
+        _hdr = self._detail_hdr
+        _btn_primary(_hdr, "Inspect Now",
                      lambda i=fresh: self._open_inspection_form(i),
-                     width=110).pack(side="right", padx=(0, 12), pady=8)
-
-        _btn_secondary(topbar, "⚙ Edit Setup",
+                     width=110).pack(side="right", padx=(6, 0))
+        _btn_secondary(_hdr, "⚙ Edit Setup",
              lambda i=fresh: IncubatorDialog(
                  self, i,
                  on_save=lambda: self._refresh_current(),
                  on_delete=self._after_inc_delete),
-             width=110).pack(side="right", padx=4, pady=8)
-
-        _pull_btn = _btn_secondary(topbar, "⟳ Pull Reading", None, width=130)
+             width=110).pack(side="right", padx=6)
+        _pull_btn = _btn_secondary(_hdr, "⟳ Pull Reading", None, width=130)
         _pull_btn.configure(command=lambda i=fresh, b=_pull_btn: self._manual_poll_incubator(i, b))
-        _pull_btn.pack(side="right", padx=4, pady=8)
-
-        _btn_secondary(topbar, "+ Add",
+        _pull_btn.pack(side="right", padx=6)
+        _btn_secondary(_hdr, "+ Add",
                        lambda: self._open_incubator_dialog(),
-                       width=80).pack(side="right", padx=4, pady=8)
+                       width=80).pack(side="right", padx=6)
 
-        # ── Mode + AC row (card) ──────────────────────────────────────────────
-        ctrl = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=12,
-                            border_width=1, border_color=BORDER2)
+        # ── Mode + AC row (card) — exact prototype values ──────────────────────
+        ctrl = ctk.CTkFrame(frame, fg_color="#151E2E", corner_radius=12,
+                            border_width=1, border_color="#232F42")
         ctrl.pack(fill="x", padx=16, pady=(0, 6))
 
-        _label(ctrl, "Temp Mode:", FONT_S, SUBTEXT).pack(side="left", padx=(16, 6), pady=8)
+        _label(ctrl, "Temp Mode", ("Segoe UI", 11, "bold"), "#6B7280").pack(
+            side="left", padx=(16, 16), pady=12)
 
         _det_mode_key = fresh.get("temp_mode", "incubation")
-        _det_mode_var = ctk.StringVar(value=calc.TEMP_MODES.get(_det_mode_key, calc.TEMP_MODES["incubation"])["label"])
-        _det_range_lbl = _label(ctrl, "", FONT_S, SUBTEXT)
 
-        def _update_range_lbl(cfg, lbl=_det_range_lbl):
-            if cfg["min"] is None:
-                lbl.configure(text="No alerts")
-            else:
-                lbl.configure(text=f"{cfg['min']}–{cfg['max']} °C")
-
-        _update_range_lbl(calc.TEMP_MODES.get(_det_mode_key, calc.TEMP_MODES["incubation"]))
-
-        def _on_detail_mode(label, iid=fresh["id"]):
-            key  = calc._MODE_BY_LABEL.get(label, "incubation")
+        def _set_detail_mode(key, iid=fresh["id"]):
             prev = next((x for x in db.get_incubators(include_hidden=True)
                          if x["id"] == iid), {}).get("temp_mode", "incubation")
             db.set_incubator_temp_mode(iid, key)
             self._sync_trays_to_mode(iid, key, prev)
-            _update_range_lbl(calc.TEMP_MODES[key])
             self._refresh_current()
 
-        ctk.CTkSegmentedButton(
-            ctrl,
-            values=[v["label"] for v in calc.TEMP_MODES.values()],
-            variable=_det_mode_var,
-            command=_on_detail_mode,
-            width=320, height=28,
-        ).pack(side="left", padx=4)
-        _det_range_lbl.pack(side="left", padx=(10, 20))
-
-        _alerts_on = bool(fresh.get("temp_alerts_enabled", 1))
-        _alert_sv  = ctk.StringVar(value="🔔  Alerts On" if _alerts_on else "🔕  Alerts Off")
-
-        def _toggle_alert(iid=fresh["id"], sv=_alert_sv):
-            cur = next((x for x in db.get_incubators(include_hidden=True) if x["id"] == iid), {})
-            new = not bool(cur.get("temp_alerts_enabled", 1))
-            db.set_incubator_alerts_enabled(iid, new)
-            sv.set("🔔  Alerts On" if new else "🔕  Alerts Off")
-            self._refresh_current()
-
-        ctk.CTkButton(
-            ctrl, textvariable=_alert_sv, font=FONT_S,
-            fg_color=BORDER, hover_color=CARD2, text_color=TEXT,
-            width=130, height=28, command=_toggle_alert,
-        ).pack(side="left", pady=8)
-
-        # ── Sensibo AC manual controls (only when a device ID is configured) ──
-        if fresh.get("sensibo_device_id"):
-            _label(ctrl, "AC:", FONT_S, SUBTEXT).pack(side="left", padx=(20, 6), pady=8)
-            _dt_lbl, _dt_fg, _dt_tc = self._ac_toggle_style(fresh["sensibo_device_id"])
+        # Segmented control — no wrapping panel (spec: bare row of buttons, gap 5px)
+        _seg = ctk.CTkFrame(ctrl, fg_color="transparent")
+        _seg.pack(side="left", pady=8)
+        for _mkey, _mlabel in (("off", "Off"), ("cool_storage", "Cool"),
+                               ("incubation", "Inc"), ("holding", "Hold")):
+            _act = (_mkey == _det_mode_key)
+            _mc  = MODE_COLORS.get(_mkey, BLUE)
+            _txt_col = GOLD if (_act and _mkey == "holding") else (_mc if _act else "#94A3B8")
             ctk.CTkButton(
-                ctrl, text=_dt_lbl, width=86, height=28, corner_radius=14,
-                fg_color=_dt_fg, hover_color=BORDER, text_color=_dt_tc,
-                font=("Segoe UI", 11, "bold"),
-                command=lambda i=fresh["id"], d=fresh["sensibo_device_id"]: self._sensibo_toggle_power(i, d),
-            ).pack(side="left", padx=2, pady=8)
-            _btn(ctrl, self._ac_temp_label(fresh["sensibo_device_id"]),
-                 lambda i=fresh["id"], d=fresh["sensibo_device_id"], n=fresh["name"]: self._sensibo_prompt_temp(i, d, n),
-                 width=92, height=28, fg=CARD2, hover=BORDER).pack(side="left", padx=2, pady=8)
-            _btn(ctrl, self._ac_fan_label(fresh["sensibo_device_id"]),
-                 lambda i=fresh["id"], d=fresh["sensibo_device_id"], n=fresh["name"]: self._sensibo_prompt_fan(i, d, n),
-                 width=92, height=28, fg=CARD2, hover=BORDER).pack(side="left", padx=2, pady=8)
+                _seg, text=_mlabel, width=0, height=28, corner_radius=6,
+                fg_color=MODE_BADGE_BG.get(_mkey, "#1B2536") if _act else "#1B2536",
+                hover_color="#243044", text_color=_txt_col,
+                font=("Segoe UI", 11, "bold" if _act else "normal"),
+                border_width=1, border_color=(_mc if _act else "#2A3648"),
+                command=lambda k=_mkey: _set_detail_mode(k),
+            ).pack(side="left", padx=(0, 5))
+
+        # Goal · range text
+        _gt2, _ = db.get_mode_goals(_det_mode_key)
+        _rmin, _rmax = calc.get_temp_range(fresh)
+        _grp = []
+        if _gt2 is not None:
+            _grp.append(f"Goal {calc.format_temp(_gt2, unit)}")
+        if _rmin is not None:
+            _grp.append(f"range {_rmin}-{_rmax}°C")
+        _label(ctrl, "  ·  ".join(_grp) if _grp else "No target set",
+               ("Segoe UI", 11), "#6B7280").pack(side="left", padx=(14, 0), pady=10)
+
+        # ── AC controls (right side): Power · Set Temp · Fan ───────────────────
+        # Spec base style (all three identical when idle): #202B3D bg, #374151
+        # border, #CBD5E1 text. We additionally tint Power green/red when the
+        # AC's on/off state is known (implementation guide: toggle buttons
+        # restyle on state) — the prototype's static mock doesn't show this
+        # since it has no live device to read from.
+        _dev = (fresh.get("sensibo_device_id") or "").strip()
+
+        def _no_ac(*_):
+            messagebox.showinfo("AC Control",
+                "No Sensibo device is configured for this incubator.\n"
+                "Add its Sensibo Device ID in Edit Setup.", parent=self)
+
+        _ac_base = dict(fg_color="#202B3D", hover_color="#28374D",
+                        text_color="#CBD5E1", border_width=1, border_color="#374151")
+
+        if _dev:
+            _pl, _pf, _ptc = self._ac_toggle_style(_dev)
+            _fan_cmd  = lambda i=fresh["id"], d=_dev, n=fresh["name"]: self._sensibo_prompt_fan(i, d, n)
+            _temp_cmd = lambda i=fresh["id"], d=_dev, n=fresh["name"]: self._sensibo_prompt_temp(i, d, n)
+            _pow_cmd  = lambda i=fresh["id"], d=_dev: self._sensibo_toggle_power(i, d)
+            _fan_txt  = self._ac_fan_label(_dev)
+            _temp_txt = self._ac_temp_label(_dev)
+        else:
+            _pl, _pf, _ptc = "Power", "#202B3D", "#CBD5E1"
+            _fan_cmd = _temp_cmd = _pow_cmd = _no_ac
+            _fan_txt, _temp_txt = "Fan", "Set Temp"
+
+        ctk.CTkButton(ctrl, text=_fan_txt, width=88, height=32, corner_radius=7,
+                      font=("Segoe UI", 11),
+                      command=_fan_cmd, **_ac_base).pack(side="right", padx=(4, 16), pady=8)
+        ctk.CTkButton(ctrl, text=_temp_txt, width=96, height=32, corner_radius=7,
+                      font=("Segoe UI", 11), command=_temp_cmd, **_ac_base
+                      ).pack(side="right", padx=4, pady=8)
+        ctk.CTkButton(ctrl, text=_pl, width=84, height=32, corner_radius=7,
+                      fg_color=_pf, hover_color="#28374D", text_color=_ptc,
+                      font=("Segoe UI", 11), border_width=1,
+                      border_color=("#374151" if _pf == "#202B3D" else _pf),
+                      command=_pow_cmd
+                      ).pack(side="right", padx=4, pady=8)
 
         # ── Scrollable body ───────────────────────────────────────────────────
         body = ctk.CTkScrollableFrame(frame, fg_color="transparent", corner_radius=0)
@@ -3809,7 +3821,7 @@ class IncubationApp(ctk.CTk):
         btn_row = ctk.CTkFrame(chart_hdr, fg_color="transparent")
         btn_row.pack(side="right")
 
-        chart_title = _label(chart_hdr, "Last 24 Hours", FONT_B, GOLD)
+        chart_title = _label(chart_hdr, "Last 24H", ("Segoe UI", 12.5, "bold"), GOLD)
         chart_title.pack(side="left")
 
         # Canvas holder — we replace its contents when the range changes
@@ -3840,20 +3852,30 @@ class IncubationApp(ctk.CTk):
                 return
 
             try:
-                timestamps = [datetime.fromisoformat(r["timestamp"]) for r in readings]
-                temps      = [r["temperature_c"] for r in readings]
-                hums       = [r["humidity_pct"]  for r in readings]
-                if unit == "F":
-                    temps = [calc.c_to_f(t) for t in temps]
+                # Build series, breaking the line (NaN) across gaps in the data
+                # so missing stretches don't get a misleading straight diagonal.
+                _GAP_SEC = 2700  # 45 min (poll interval is 15 min)
+                timestamps, temps, hums = [], [], []
+                _prev_ts = None
+                for r in readings:
+                    ts = datetime.fromisoformat(r["timestamp"])
+                    if _prev_ts is not None and (ts - _prev_ts).total_seconds() > _GAP_SEC:
+                        timestamps.append(_prev_ts + (ts - _prev_ts) / 2)
+                        temps.append(float("nan")); hums.append(float("nan"))
+                    tv = r["temperature_c"]
+                    timestamps.append(ts)
+                    temps.append(calc.c_to_f(tv) if unit == "F" and tv is not None else tv)
+                    hums.append(r["humidity_pct"])
+                    _prev_ts = ts
                 temp_lbl = f"Temp (°{unit})"
 
-                fig = Figure(figsize=(10, 2.8), facecolor="#1F2937")
+                fig = Figure(figsize=(10, 2.5), facecolor="#151E2E")
                 ax1 = fig.add_subplot(111)
                 ax2 = ax1.twinx()
 
-                ax1.plot(timestamps, temps, color="#FFD700", linewidth=1.8)
-                ax2.plot(timestamps, hums,  color="#60A5FA", linewidth=1.2,
-                         alpha=0.6, linestyle="--")
+                ax1.plot(timestamps, temps, color="#FFD700", linewidth=2)
+                ax2.plot(timestamps, hums,  color="#3B82F6", linewidth=2,
+                         linestyle=(0, (4, 3)))
 
                 t_min, t_max = calc.get_temp_range(fresh)
                 if t_min is not None:
@@ -3869,16 +3891,16 @@ class IncubationApp(ctk.CTk):
                     _gt = calc.c_to_f(goal_t) if unit == "F" else goal_t
                     ax1.axhline(_gt, color="#FFD700", linewidth=1.1, linestyle=":")
                 if goal_h is not None:
-                    ax2.axhline(goal_h, color="#60A5FA", linewidth=1.1, linestyle=":")
+                    ax2.axhline(goal_h, color="#3B82F6", linewidth=1.1, linestyle=":")
 
                 for ax in (ax1, ax2):
-                    ax.set_facecolor("#1F2937")
+                    ax.set_facecolor("#151E2E")
                     ax.tick_params(colors="#9CA3AF", labelsize=8)
                     for spine in ax.spines.values():
                         spine.set_edgecolor("#374151")
 
                 ax1.set_ylabel(temp_lbl, color="#FFD700", fontsize=8)
-                ax2.set_ylabel("Humidity %", color="#60A5FA", fontsize=8)
+                ax2.set_ylabel("Humidity %", color="#3B82F6", fontsize=8)
 
                 # Pick x-axis format based on range
                 if hours <= 1:
@@ -3901,6 +3923,16 @@ class IncubationApp(ctk.CTk):
                 canvas = FigureCanvasTkAgg(fig, master=chart_canvas_frame)
                 canvas.draw()
                 canvas.get_tk_widget().pack(fill="x")
+
+                # Legend row below the chart — exact spec: swatch + label, 10.5px muted
+                leg_row = ctk.CTkFrame(chart_canvas_frame, fg_color="transparent")
+                leg_row.pack(fill="x", pady=(6, 0))
+                for _color, _text in (("#FFD700", "Temp °C"), ("#3B82F6", "Humidity %")):
+                    _item = ctk.CTkFrame(leg_row, fg_color="transparent")
+                    _item.pack(side="left", padx=(0, 16))
+                    ctk.CTkFrame(_item, fg_color=_color, width=10, height=2
+                                ).pack(side="left", pady=1)
+                    _label(_item, " " + _text, ("Segoe UI", 10.5), "#6B7280").pack(side="left")
             except Exception as exc:
                 _label(chart_canvas_frame, f"Chart error: {exc}", FONT_S, RED).pack(pady=10)
 
@@ -3922,10 +3954,53 @@ class IncubationApp(ctk.CTk):
 
         # ── Tabs: Inspections / Batches / Trays / VOC ─────────────────────────
         # Tabs are built lazily — content is only created the first time each tab is selected.
-        tabs = ctk.CTkTabview(body, fg_color=PANEL, corner_radius=12,
-                              segmented_button_selected_color=BLUE,
-                              segmented_button_selected_hover_color="#1D4ED8")
-        tabs.pack(fill="both", expand=True, padx=16, pady=(4, 12))
+        # CTkSegmentedButton always draws as ONE fused strip with no real gaps
+        # between segments, which doesn't match the prototype's 4 separate
+        # rounded pill buttons. So: use CTkTabview purely as the content
+        # switcher (hide its built-in button row) and drive it with our own
+        # row of individually-styled pill buttons instead.
+        tabs = ctk.CTkTabview(
+            body, fg_color="transparent", corner_radius=0, border_width=0,
+        )
+        # NOTE: .add() re-grids (re-shows) the built-in segmented button when
+        # adding the FIRST tab — so grid_forget() must happen AFTER all tabs
+        # are added, not before, or the built-in strip reappears alongside
+        # our custom pill row (the duplicate tab-row bug).
+        _tab_names = ("Inspections", "Batches", "Trays", "VOC Monitor")
+        for _tn in _tab_names:
+            tabs.add(_tn)
+        tabs._segmented_button.grid_forget()   # hide the fused built-in strip
+
+        # Custom pill row — spec exact: gap 6px, padding 8px 16px, radius 7px,
+        # active border #3B82F6 / bg #22314A / text #93C5FD, inactive #2A3648 / #1B2536 / #9CA3AF
+        pill_row = ctk.CTkFrame(body, fg_color="transparent")
+        pill_row.pack(pady=(4, 10))
+        _pill_btns: dict = {}
+
+        def _select_tab(name):
+            tabs.set(name)
+            for tn, btn in _pill_btns.items():
+                _act = (tn == name)
+                btn.configure(
+                    fg_color="#22314A" if _act else "#1B2536",
+                    hover_color="#28395A" if _act else CARD2,
+                    text_color="#93C5FD" if _act else "#9CA3AF",
+                    border_color="#3B82F6" if _act else "#2A3648",
+                    font=("Segoe UI", 11.5, "bold" if _act else "normal"))
+            frame._active_tab = name
+            if name not in _tab_built:
+                _tab_built.add(name)
+                _tab_builders[name]()
+
+        for _tn in _tab_names:
+            _b = ctk.CTkButton(
+                pill_row, text=_tn, height=32, corner_radius=7,
+                fg_color="#1B2536", hover_color=CARD2, text_color="#9CA3AF",
+                border_width=1, border_color="#2A3648",
+                font=("Segoe UI", 11.5), command=lambda n=_tn: _select_tab(n),
+            )
+            _b.pack(side="left", padx=3)
+            _pill_btns[_tn] = _b
 
         _tab_built: set = set()
 
@@ -3980,10 +4055,12 @@ class IncubationApp(ctk.CTk):
                 n = sum(1 for v in _tray_checks.values() if v.get())
                 if n:
                     delete_btn.configure(text=f"Delete {n} Selected",
-                                         fg_color=RED, hover_color="#B91C1C", state="normal")
+                                         fg_color="#2A1E20", hover_color="#3A2224",
+                                         text_color="#FF6A57", state="normal")
                 else:
                     delete_btn.configure(text="Delete Selected",
-                                         fg_color=BORDER, hover_color=CARD2, state="disabled")
+                                         fg_color="#2A1E20", hover_color="#3A2224",
+                                         text_color="#FF6A57", state="disabled")
 
             def _select_all_toggle():
                 all_on = all(v.get() for v in _tray_checks.values()) if _tray_checks else False
@@ -4038,9 +4115,9 @@ class IncubationApp(ctk.CTk):
 
             tray_count_lbl = _label(tray_hdr, "", FONT_S, SUBTEXT)
             tray_count_lbl.pack(side="left")
-            _btn(tray_hdr, "⬇ Template",
+            _btn_secondary(tray_hdr, "⬇ Template",
                  lambda: self._tray_csv_template(default_incubator_name=fresh["name"]),
-                 width=110, height=28, fg=BORDER, hover=CARD2).pack(side="right", padx=(4, 0))
+                 width=110).pack(side="right", padx=(4, 0))
             _btn(tray_hdr, "Import CSV",
                  lambda: self._tray_csv_import(default_incubator_id=fresh["id"],
                                                on_complete=_refresh_tray_list),
@@ -4050,14 +4127,16 @@ class IncubationApp(ctk.CTk):
                  lambda: self._release_csv_import(on_complete=_refresh_tray_list),
                  width=110, height=28, fg="#7C3AED", hover="#6D28D9",
                  text_color="white").pack(side="right", padx=4)
-            _btn(tray_hdr, "⬇ Release Template", self._release_csv_template,
-                 width=150, height=28, fg=BORDER, hover=CARD2).pack(side="right", padx=(0, 2))
+            _btn_secondary(tray_hdr, "⬇ Release Template", self._release_csv_template,
+                 width=150).pack(side="right", padx=(0, 2))
             delete_btn = ctk.CTkButton(tray_hdr, text="Delete Selected", width=130, height=28,
-                fg_color=BORDER, hover_color=CARD2, text_color=TEXT,
-                corner_radius=6, font=FONT_S, state="disabled", command=_delete_selected)
+                fg_color="#2A1E20", hover_color="#3A2224", text_color="#FF6A57",
+                corner_radius=8, font=("Segoe UI", 11, "bold"),
+                border_width=1, border_color="#5A2A2C",
+                state="disabled", command=_delete_selected)
             delete_btn.pack(side="right", padx=4)
-            _btn(tray_hdr, "Select All", _select_all_toggle,
-                 width=90, height=28, fg=BORDER, hover=CARD2).pack(side="right", padx=(0, 2))
+            _btn_secondary(tray_hdr, "Select All", _select_all_toggle,
+                 width=90).pack(side="right", padx=(0, 2))
             _refresh_tray_list()
 
         def _build_voc_tab():
@@ -4065,10 +4144,8 @@ class IncubationApp(ctk.CTk):
             VOCPanel(vt, incubator_id=fresh["id"]).pack(fill="both", expand=True)
 
         # Register all tab names first (required before .tab() can be called)
-        for tab_name in ("Inspections", "Batches", "Trays", "VOC Monitor"):
-            tabs.add(tab_name)
-
-        # Map tab name → builder function
+        # Map tab name → builder function (tabs were already added above,
+        # alongside the custom pill row that drives _select_tab)
         _tab_builders = {
             "Inspections": _build_inspections_tab,
             "Batches":     _build_batches_tab,
@@ -4076,22 +4153,12 @@ class IncubationApp(ctk.CTk):
             "VOC Monitor": _build_voc_tab,
         }
 
-        def _on_tab_change():
-            name = tabs.get()
-            frame._active_tab = name
-            if name not in _tab_built:
-                _tab_built.add(name)
-                _tab_builders[name]()
-
-        tabs.configure(command=_on_tab_change)
+        # Also pack the content area itself now that tabs/pills exist
+        tabs.pack(fill="both", expand=True, padx=16, pady=(0, 12))
 
         # Restore the previously active tab (or default to Inspections)
         restore_tab = _prev_tab if _prev_tab in _tab_builders else "Inspections"
-        _tab_built.add(restore_tab)
-        _tab_builders[restore_tab]()
-        if restore_tab != "Inspections":
-            tabs.set(restore_tab)
-        frame._active_tab = restore_tab
+        _select_tab(restore_tab)
 
     def _open_inc_detail_window(self, inc: dict):
         """Open a detail window with VOC Monitor, Inspections, Batches and Trays tabs."""
