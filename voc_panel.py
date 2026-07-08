@@ -545,6 +545,10 @@ class VOCPanel(ctk.CTkFrame):
         for ts, ppm in pts:
             try:
                 dt = datetime.fromisoformat(ts)
+                # Sensor timestamps are stored in UTC; plot in local wall-clock
+                # time so the curve lines up with the temperature charts.
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone().replace(tzinfo=None)
             except Exception:
                 continue
             if prev is not None and (dt - prev).total_seconds() > 1800:
