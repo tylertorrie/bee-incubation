@@ -66,7 +66,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.40.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.43.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -912,6 +912,154 @@ class AlertsDialog(ctk.CTkToplevel):
             self.on_ack()
 
 
+class _VocDeviceManager(ctk.CTkToplevel):
+    """Assign Vapona (VOC) sensors to incubators / positions. App-authoritative:
+    each Pi reports a stable hardware_id and the app owns name/incubator/position."""
+
+    _POSITIONS = ["front", "back"]
+    _ONLINE_SECS = 40 * 60  # a sensor polling every 15 min is "online" within 40 min
+
+    def __init__(self, master, on_close=None):
+        super().__init__(master, fg_color=BG)
+        self.on_close = on_close
+        self.title("Vapona Sensors")
+        self.geometry("720x520")
+        self.grab_set()
+        # incubator id -> display name, plus an "Unassigned" choice
+        self._incs = [i for i in db.get_incubators() if not i.get("is_hidden")]
+        self._inc_label = {i["id"]: i["name"] for i in self._incs}
+        self._build()
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+    def _build(self):
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(12, 4))
+        _label(top, "Vapona Sensors", FONT_H, GOLD).pack(side="left")
+        _btn(top, "Refresh", self._load, fg=CARD2, hover=BORDER,
+             width=90).pack(side="right")
+        _label(self, "Sensors report a hardware ID automatically. Assign each to an "
+                     "incubator and position, then Save.",
+               FONT_S, SUBTEXT).pack(anchor="w", padx=18, pady=(0, 4))
+        self._scroll = ctk.CTkScrollableFrame(self, fg_color=CARD)
+        self._scroll.pack(fill="both", expand=True, padx=12, pady=8)
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.pack(fill="x", padx=16, pady=(0, 12))
+        _btn(btns, "Save Assignments", self._save, fg=DK_GOLD, hover=GOLD,
+             text_color="black", width=160).pack(side="right", padx=4)
+        _btn(btns, "Close", self._close, width=100).pack(side="right")
+
+        self._load()
+
+    def _online(self, last_seen: str) -> bool:
+        if not last_seen:
+            return False
+        try:
+            dt = datetime.fromisoformat(last_seen)
+            return (datetime.now() - dt).total_seconds() <= self._ONLINE_SECS
+        except Exception:
+            return False
+
+    def _load(self):
+        for w in self._scroll.winfo_children():
+            w.destroy()
+        self._rows = []
+        try:
+            devs = voc_db.get_devices()
+        except Exception as exc:
+            _label(self._scroll, f"Could not load devices: {exc}",
+                   FONT_S, RED).pack(pady=20)
+            return
+        if not devs:
+            _label(self._scroll, "No sensors have reported yet.\n"
+                   "Power on a Pi sensor — it will appear here automatically.",
+                   FONT_S, SUBTEXT).pack(pady=24)
+            return
+
+        inc_choices = ["Unassigned"] + [self._inc_label[i["id"]] for i in self._incs]
+        for d in devs:
+            card = ctk.CTkFrame(self._scroll, fg_color=CARD2, corner_radius=8)
+            card.pack(fill="x", pady=4, padx=4)
+            card.columnconfigure(1, weight=1)
+
+            online = self._online(d.get("last_seen"))
+            dot = "● Online" if online else "○ Offline"
+            seen = (d.get("last_seen") or "")[:16].replace("T", " ")
+            _label(card, dot, FONT_S, GREEN if online else SUBTEXT).grid(
+                row=0, column=0, sticky="w", padx=10, pady=(8, 0))
+            _label(card, f"hardware: {d['hardware_id']}", FONT_S, SUBTEXT).grid(
+                row=0, column=1, sticky="w", padx=6, pady=(8, 0))
+            _label(card, f"last seen {seen}" if seen else "never",
+                   FONT_S, SUBTEXT).grid(row=0, column=2, sticky="e", padx=10, pady=(8, 0))
+
+            body = ctk.CTkFrame(card, fg_color="transparent")
+            body.grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=8)
+
+            _label(body, "Name", FONT_S, SUBTEXT).grid(row=0, column=0, padx=(2, 4))
+            name_e = ctk.CTkEntry(body, width=150, fg_color=CARD,
+                                  border_color=BORDER, text_color=TEXT)
+            name_e.grid(row=0, column=1, padx=4)
+            name_e.insert(0, d.get("name") or "")
+
+            _label(body, "Incubator", FONT_S, SUBTEXT).grid(row=0, column=2, padx=(12, 4))
+            inc_var = ctk.StringVar(
+                value=self._inc_label.get(d.get("incubator_id"), "Unassigned"))
+            inc_cb = ctk.CTkComboBox(body, values=inc_choices, variable=inc_var,
+                                     width=150, fg_color=CARD, border_color=BORDER,
+                                     button_color=BORDER, text_color=TEXT,
+                                     dropdown_fg_color=CARD, state="readonly")
+            inc_cb.grid(row=0, column=3, padx=4)
+
+            _label(body, "Position", FONT_S, SUBTEXT).grid(row=0, column=4, padx=(12, 4))
+            pos_var = ctk.StringVar(value=d.get("position") or "front")
+            pos_cb = ctk.CTkComboBox(body, values=self._POSITIONS, variable=pos_var,
+                                     width=90, fg_color=CARD, border_color=BORDER,
+                                     button_color=BORDER, text_color=TEXT,
+                                     dropdown_fg_color=CARD, state="readonly")
+            pos_cb.grid(row=0, column=5, padx=4)
+
+            _btn(body, "🗑", lambda did=d["id"]: self._delete(did),
+                 width=36, height=28, fg=BORDER, hover=RED,
+                 text_color="white").grid(row=0, column=6, padx=(12, 2))
+
+            self._rows.append((d["id"], name_e, inc_var, pos_var))
+
+    def _inc_id_from_label(self, label):
+        if label in (None, "", "Unassigned"):
+            return None
+        for iid, name in self._inc_label.items():
+            if name == label:
+                return iid
+        return None
+
+    def _save(self):
+        for dev_id, name_e, inc_var, pos_var in self._rows:
+            voc_db.update_device(
+                dev_id,
+                name=name_e.get().strip(),
+                incubator_id=self._inc_id_from_label(inc_var.get()),
+                position=pos_var.get())
+        messagebox.showinfo("Vapona Sensors", "Assignments saved.", parent=self)
+        self._load()
+
+    def _delete(self, dev_id):
+        if not messagebox.askyesno(
+                "Delete sensor",
+                "Remove this sensor from the app?\n\nIf it is still powered on it "
+                "will re-appear (unassigned) the next time it reports.", parent=self):
+            return
+        voc_db.delete_device(dev_id)
+        self._load()
+
+    def _close(self):
+        if self.on_close:
+            try:
+                self.on_close()
+            except Exception:
+                pass
+        self.destroy()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #   MAIN APP
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1181,6 +1329,27 @@ class IncubationApp(ctk.CTk):
         self._detail_inc = {}
         self.show_view("dashboard")
 
+    def _toast(self, text: str, color: str = None, ms: int = 3500):
+        """Brief, self-dismissing confirmation banner overlaid on the window.
+        Parented to the app (not a view frame) so it survives view rebuilds."""
+        try:
+            old = getattr(self, "_toast_win", None)
+            if old is not None and old.winfo_exists():
+                old.destroy()
+        except Exception:
+            pass
+        try:
+            tw = ctk.CTkFrame(self, fg_color=(color or "#1B3A2A"),
+                              corner_radius=10, border_width=1, border_color=GREEN)
+            _label(tw, text, ("Segoe UI", 12, "bold"), "#EAF7EF").pack(
+                padx=16, pady=8)
+            tw.place(relx=0.5, rely=0.045, anchor="n")
+            tw.lift()
+            self._toast_win = tw
+            self.after(ms, lambda w=tw: w.winfo_exists() and w.destroy())
+        except Exception:
+            pass
+
     def _manual_poll_incubator(self, inc: dict, btn=None):
         """Force an immediate Govee reading for one incubator (background thread)."""
         if not (inc.get("govee_device_id") and inc.get("govee_sku")):
@@ -1207,7 +1376,18 @@ class IncubationApp(ctk.CTk):
                     if temp_c is not None and humidity is not None:
                         tc = govee_mod.to_celsius(temp_c)
                         db.save_reading(iid, tc, humidity)
+                        # Keep the in-memory cache fresh so the detail view and
+                        # tiles agree with what we just stored.
+                        self._govee._last[iid] = {
+                            "temp_c": tc, "humidity": humidity,
+                            "timestamp": datetime.now().isoformat()}
                         self._refresh_alert_badge()
+                        # Visible confirmation that survives the view rebuild
+                        unit = (db.get_setting("temp_unit", "C") or "C").upper()
+                        shown = tc if unit.startswith("C") else round(tc * 9 / 5 + 32, 1)
+                        self._toast(f"✓ {inc.get('name', 'Incubator')} updated:  "
+                                    f"{shown:g}°{unit[:1]}   {humidity:g}% RH   "
+                                    f"{datetime.now():%H:%M}")
                         # Rebuild the detail view (safely) to show the new reading
                         if self._current_view == "inc_detail":
                             self._refresh_inc_detail()
@@ -2962,6 +3142,21 @@ class IncubationApp(ctk.CTk):
         self._sensibo_status_lbl = _label(sf, "", FONT_S, SUBTEXT)
         self._sensibo_status_lbl.grid(row=3, column=1, sticky="w", padx=4, pady=2)
 
+        # Vapona Sensors (VOC device management)
+        vf = section("Vapona Sensors")
+        _label(vf, "Manage the Raspberry Pi VOC sensors. Each sensor reports a\n"
+                   "stable hardware ID; assign it to an incubator and position\n"
+                   "here (the app is authoritative — the Pi does not decide).",
+               FONT_S, SUBTEXT).grid(row=0, column=0, columnspan=2, sticky="w",
+                                     padx=4, pady=(0, 6))
+        _btn(vf, "Manage Vapona Sensors", self._manage_voc_devices,
+             fg=BLUE, hover="#1D4ED8", text_color="white", width=200).grid(
+                 row=1, column=0, sticky="w", padx=4, pady=4)
+        self._voc_dev_status_lbl = _label(vf, "", FONT_S, SUBTEXT)
+        self._voc_dev_status_lbl.grid(row=2, column=0, columnspan=2, sticky="w",
+                                      padx=4, pady=2)
+        self._refresh_voc_dev_status()
+
         # Google Calendar Sync
         gcf = section("Google Calendar Sync")
         _label(gcf, "Auto-push the incubation Calendar to Google Calendar.\n"
@@ -3284,6 +3479,28 @@ class IncubationApp(ctk.CTk):
             return True
         except FileNotFoundError:
             return False
+
+    def _refresh_voc_dev_status(self):
+        try:
+            devs = voc_db.get_devices()
+        except Exception as exc:
+            self._voc_dev_status_lbl.configure(
+                text=f"(unavailable: {exc})", text_color=SUBTEXT)
+            return
+        total = len(devs)
+        unassigned = sum(1 for d in devs if d.get("incubator_id") is None)
+        if total == 0:
+            self._voc_dev_status_lbl.configure(
+                text="No sensors have reported yet.", text_color=SUBTEXT)
+        else:
+            msg = f"{total} sensor(s) known"
+            if unassigned:
+                msg += f"  •  {unassigned} unassigned"
+            self._voc_dev_status_lbl.configure(
+                text=msg, text_color=(GOLD if unassigned else GREEN))
+
+    def _manage_voc_devices(self):
+        _VocDeviceManager(self, on_close=self._refresh_voc_dev_status)
 
     def _refresh_poller_status(self):
         import json, socket
@@ -3966,7 +4183,7 @@ class IncubationApp(ctk.CTk):
         # adding the FIRST tab — so grid_forget() must happen AFTER all tabs
         # are added, not before, or the built-in strip reappears alongside
         # our custom pill row (the duplicate tab-row bug).
-        _tab_names = ("Inspections", "Batches", "Trays", "VOC Monitor")
+        _tab_names = ("Inspections", "Batches", "Trays", "Vapona Monitor")
         for _tn in _tab_names:
             tabs.add(_tn)
         tabs._segmented_button.grid_forget()   # hide the fused built-in strip
@@ -4140,7 +4357,7 @@ class IncubationApp(ctk.CTk):
             _refresh_tray_list()
 
         def _build_voc_tab():
-            vt = tabs.tab("VOC Monitor")
+            vt = tabs.tab("Vapona Monitor")
             VOCPanel(vt, incubator_id=fresh["id"]).pack(fill="both", expand=True)
 
         # Register all tab names first (required before .tab() can be called)
@@ -4150,7 +4367,7 @@ class IncubationApp(ctk.CTk):
             "Inspections": _build_inspections_tab,
             "Batches":     _build_batches_tab,
             "Trays":       _build_trays_tab,
-            "VOC Monitor": _build_voc_tab,
+            "Vapona Monitor": _build_voc_tab,
         }
 
         # Also pack the content area itself now that tabs/pills exist
@@ -4161,7 +4378,7 @@ class IncubationApp(ctk.CTk):
         _select_tab(restore_tab)
 
     def _open_inc_detail_window(self, inc: dict):
-        """Open a detail window with VOC Monitor, Inspections, Batches and Trays tabs."""
+        """Open a detail window with Vapona Monitor, Inspections, Batches and Trays tabs."""
         win = ctk.CTkToplevel(self)
         win.title(f"{inc['name']} — Detail")
         win.geometry("1020x700")
@@ -4235,8 +4452,8 @@ class IncubationApp(ctk.CTk):
         tabs = ctk.CTkTabview(win, fg_color=CARD)
         tabs.pack(fill="both", expand=True, padx=12, pady=8)
 
-        # ── VOC Monitor tab (first — most used) ───────────────────────────────
-        vt = tabs.add("VOC Monitor")
+        # ── Vapona Monitor tab (first — most used) ───────────────────────────────
+        vt = tabs.add("Vapona Monitor")
         VOCPanel(vt, incubator_id=inc["id"]).pack(fill="both", expand=True)
 
         # ── Inspections tab ───────────────────────────────────────────────────

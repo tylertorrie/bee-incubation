@@ -40,10 +40,31 @@ def _env(key, default=None):
     v = os.environ.get(key)
     return v if v not in (None, "") else default
 
+
+def _hardware_id() -> str:
+    """A stable, unique identifier for this Pi. The app maps this ->
+    incubator/position, so config is owned by the app, not the Pi."""
+    try:
+        with open("/proc/cpuinfo") as fh:
+            for line in fh:
+                if line.startswith("Serial"):
+                    return "pi-" + line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    try:
+        with open("/etc/machine-id") as fh:
+            mid = fh.read().strip()
+            if mid:
+                return "mid-" + mid
+    except Exception:
+        pass
+    return "host-" + socket.gethostname()
+
 APP_URL        = _env("APP_URL")                       # e.g. http://100.101.102.103:5151
 INGEST_TOKEN   = _env("INGEST_TOKEN", "")              # must match app's voc_ingest_token ('' = open)
-INCUBATOR_ID   = int(_env("INCUBATOR_ID", "0"))        # which incubator this sensor is in
-POSITION       = _env("POSITION", "front")             # 'front' or 'back'
+HARDWARE_ID    = _env("HARDWARE_ID") or _hardware_id() # stable device id; app maps -> incubator/position
+INCUBATOR_ID   = int(_env("INCUBATOR_ID", "0"))        # optional seed only (app is authoritative)
+POSITION       = _env("POSITION", "front")             # optional seed only (app is authoritative)
 SENSOR_ID      = _env("SENSOR_ID", socket.gethostname())
 SERIAL_PORT    = _env("SERIAL_PORT", "/dev/serial0")
 BAUD           = int(_env("BAUD", "9600"))
@@ -182,12 +203,15 @@ def reader_loop(buf):
 def _post_batch(rows):
     """POST a batch of buffered rows. Returns True on success (HTTP 200 ok)."""
     payload = {
-        "incubator_id": INCUBATOR_ID,
-        "position": POSITION,
-        "sensor_id": SENSOR_ID,
+        "hardware_id": HARDWARE_ID,          # app maps this -> incubator/position
+        "sensor_id": SENSOR_ID,              # friendly name (seed on first register)
         "readings": [{"voc_ppm": ppm, "temp_c": None, "ts": ts}
                      for (_id, ts, ppm) in rows],
     }
+    # Seed hints for first-time auto-registration only (app stays authoritative)
+    if INCUBATOR_ID:
+        payload["incubator_id"] = INCUBATOR_ID
+        payload["position"] = POSITION
     data = json.dumps(payload).encode()
     req = urllib.request.Request(f"{APP_URL}/reading", data=data,
                                  headers={"Content-Type": "application/json"})
@@ -225,11 +249,9 @@ def syncer_loop(buf):
 def main():
     if not APP_URL:
         sys.exit("APP_URL not set (see /etc/vapsens/vapsens.conf)")
-    if not INCUBATOR_ID:
-        sys.exit("INCUBATOR_ID not set (which incubator is this sensor in?)")
 
-    log(f"starting: incubator={INCUBATOR_ID} position={POSITION} "
-        f"sensor={SENSOR_ID} -> {APP_URL}")
+    log(f"starting: hardware_id={HARDWARE_ID} sensor={SENSOR_ID} "
+        f"(incubator/position assigned by app) -> {APP_URL}")
     buf = Buffer(BUFFER_DB)
 
     def _sig(*_):

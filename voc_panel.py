@@ -8,18 +8,23 @@ Requires: matplotlib  (pip install matplotlib)
 import csv
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from tkinter import filedialog, messagebox
 import tkinter as tk
 
 import customtkinter as ctk
 
 import voc_db
+import incubation_db as _idb
+
+# The only chemical used — VOC monitoring runs continuously against this preset.
+DDVP_NAME = "DDVP (Vapona)"
 
 # ── Optional matplotlib ───────────────────────────────────────────────────────
 try:
     import matplotlib
     matplotlib.use("TkAgg")
+    import matplotlib.dates as mdates
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     HAS_MPL = True
@@ -188,12 +193,13 @@ class NewRunDialog(ctk.CTkToplevel):
 class PresetEditorDialog(ctk.CTkToplevel):
     """Edit or create a chemical threshold preset."""
 
-    def __init__(self, master, preset: dict = None, on_save=None):
+    def __init__(self, master, preset: dict = None, on_save=None, incubator_id=None):
         super().__init__(master)
         self.preset  = preset or {}
         self.on_save = on_save
+        self._inc_id = incubator_id
         self.title("Edit Chemical Preset" if preset else "New Chemical Preset")
-        self.geometry("460x500")
+        self.geometry("460x560")
         self.resizable(False, False)
         self.grab_set()
         self._build()
@@ -229,9 +235,15 @@ class PresetEditorDialog(ctk.CTkToplevel):
                         fg_color=GOLD, hover_color=DK_GOLD,
                         text_color=TEXT).grid(row=6, column=1, sticky="w", padx=6)
 
+        # Suggest thresholds from captured readings
+        if self._inc_id:
+            _btn(f, "📊 Suggest from recent readings", self._suggest,
+                 fg=BLUE, hover="#1D4ED8", tc="white", width=260).grid(
+                 row=7, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
+
         # Range hint
         hint = ctk.CTkFrame(f, fg_color=CARD2, corner_radius=8)
-        hint.grid(row=7, column=0, columnspan=2, sticky="ew", padx=8, pady=8)
+        hint.grid(row=8, column=0, columnspan=2, sticky="ew", padx=8, pady=8)
         _lbl(hint,
              "Required order:  low_alert < low_warn < high_warn < high_alert",
              FONT_S, SUBTEXT).pack(padx=10, pady=6)
@@ -239,13 +251,48 @@ class PresetEditorDialog(ctk.CTkToplevel):
         # Reset builtin
         if self.preset.get("is_builtin"):
             _btn(f, "Reset to Defaults", self._reset, fg=BORDER, hover=CARD2,
-                 width=160).grid(row=8, column=1, sticky="w", padx=6, pady=4)
+                 width=160).grid(row=9, column=1, sticky="w", padx=6, pady=4)
 
         btns = ctk.CTkFrame(self, fg_color="transparent")
         btns.pack(fill="x", padx=16, pady=12)
         _btn(btns, "Save", self._save, fg=DK_GOLD, hover=GOLD,
              tc="black", width=130).pack(side="right", padx=4)
         _btn(btns, "Cancel", self.destroy, width=100).pack(side="right")
+
+    def _suggest(self):
+        """Fill the threshold fields from this incubator's real captured readings."""
+        if not self._inc_id:
+            return
+        dlg = ctk.CTkInputDialog(
+            title="Suggest from readings",
+            text="Analyze this incubator's VOC readings from the last how many "
+                 "hours?\n(Cover the treatment you just captured — e.g. 48)")
+        raw = dlg.get_input()
+        if raw is None or not raw.strip():
+            return
+        try:
+            hours = int(float(raw.strip()))
+        except ValueError:
+            messagebox.showerror("Suggest", "Enter a number of hours.", parent=self)
+            return
+        s = voc_db.suggest_thresholds(self._inc_id, hours)
+        if not s:
+            messagebox.showinfo("Suggest",
+                "Not enough readings in that window (need at least 5).\n"
+                "Run a treatment with the sensor first, then try again.", parent=self)
+            return
+        su = s["suggested"]
+        for entry, key in ((self._la, "la"), (self._lw, "lw"),
+                           (self._hw, "hw"), (self._ha, "ha")):
+            entry.delete(0, "end")
+            entry.insert(0, str(su[key]))
+        messagebox.showinfo("Suggested from your data",
+            f"Analyzed {s['count']} readings over the last {hours}h:\n"
+            f"    baseline {s['baseline']}   median {s['median']}   "
+            f"peak {s['peak']} ppm\n\n"
+            "Filled the fields with a starting band around the treatment level.\n"
+            "These are a starting point — adjust to your actual Vapona protocol,\n"
+            "then Save and tick 'Confirmed' once you trust them.", parent=self)
 
     def _reset(self):
         if messagebox.askyesno(
@@ -299,124 +346,129 @@ class PresetEditorDialog(ctk.CTkToplevel):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class VOCPanel(ctk.CTkFrame):
+    """Continuous VOC (Vapona) monitor for one incubator.
+
+    Works like the temperature history: readings stream in continuously (the
+    app only stores them while the incubator is on), and this panel shows the
+    current level plus a trend chart against the fixed Vapona (DDVP) thresholds.
+    No runs, no chemical picker.
     """
-    Full VOC monitoring dashboard for one incubator.
-    Drop into any CTkTabview tab or CTkFrame container.
-    """
+
+    RANGES = [("24H", 24), ("7D", 24 * 7), ("Month", 24 * 30)]
 
     def __init__(self, master, incubator_id: int, **kwargs):
         kwargs.setdefault("fg_color", "transparent")
         super().__init__(master, **kwargs)
         self.incubator_id = incubator_id
-        self._active_run  = None
-        self._shown_run   = None     # may be a historical run
-        self._fig         = None
-        self._canvas      = None
-        self._after_id    = None
+        self._hours    = 24
+        self._fig      = None
+        self._ax       = None
+        self._canvas   = None
+        self._after_id = None
 
         voc_db.ensure_sensor_positions(incubator_id)
         self._build()
         self.refresh()
 
+    # ── Helpers ────────────────────────────────────────────────────────────────
+
+    def _preset(self) -> dict:
+        return voc_db.get_preset_by_name(DDVP_NAME) or {
+            "low_alert_ppm": 0.20, "low_warn_ppm": 0.25,
+            "high_warn_ppm": 0.60, "high_alert_ppm": 0.70, "confirmed": 0}
+
+    def _mode(self) -> str:
+        inc = next((i for i in _idb.get_incubators(include_hidden=True)
+                    if i["id"] == self.incubator_id), None)
+        return (inc.get("temp_mode") if inc else "incubation") or "incubation"
+
+    @staticmethod
+    def _age_seconds(ts):
+        if not ts:
+            return None
+        try:
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - dt).total_seconds()
+        except Exception:
+            return None
+
     # ── Layout ────────────────────────────────────────────────────────────────
 
     def _build(self):
-        # Run bar (top)
-        self._run_bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=10,
-                                     border_width=1, border_color=BORDER2)
-        self._run_bar.pack(fill="x", padx=8, pady=(8, 4))
-        self._run_info_lbl = _lbl(self._run_bar, "No active run", FONT_B, SUBTEXT)
-        self._run_info_lbl.pack(side="left", padx=12, pady=6)
-        self._unconf_lbl = _lbl(self._run_bar, "", FONT_S, AMBER)
-        self._unconf_lbl.pack(side="left", padx=4)
+        hdr = ctk.CTkFrame(self, fg_color="transparent")
+        hdr.pack(fill="x", padx=8, pady=(8, 4))
+        _lbl(hdr, "Vapona Monitor", FONT_H, GOLD).pack(side="left", padx=(4, 10))
+        self._unconf_lbl = _lbl(hdr, "", FONT_S, AMBER)
+        self._unconf_lbl.pack(side="left")
 
-        rb = ctk.CTkFrame(self._run_bar, fg_color="transparent")
-        rb.pack(side="right", padx=8, pady=6)
-        ctk.CTkButton(
-            rb, text="New Run", command=self._new_run, width=90, height=28,
-            corner_radius=8, fg_color="#C79114", hover_color="#E0A81A",
-            text_color="#1A1206", font=("Segoe UI", 11, "bold"),
-            border_width=1, border_color=DK_GOLD,
-        ).pack(side="right", padx=3)
-        self._end_btn = _btn(rb, "End Run", self._end_run,
-                             fg=CARD2, hover=BORDER, width=85, height=28)
-        self._end_btn.pack(side="right", padx=3)
-        _btn(rb, "Presets", self._open_presets, fg=CARD2, hover=BORDER,
-             width=80, height=28).pack(side="right", padx=3)
+        _btn(hdr, "Edit thresholds", self._edit_thresholds,
+             fg=CARD2, hover=BORDER, width=130, height=26).pack(side="right", padx=(0, 4))
+        rng = ctk.CTkFrame(hdr, fg_color="transparent")
+        rng.pack(side="right", padx=(0, 8))
+        self._range_btns = {}
+        for lbl, hrs in self.RANGES:
+            b = ctk.CTkButton(
+                rng, text=lbl, width=56, height=26, corner_radius=6,
+                font=("Segoe UI", 10, "bold"),
+                fg_color=GOLD if hrs == self._hours else CARD2,
+                text_color="#1A1206" if hrs == self._hours else SUBTEXT,
+                hover_color=BORDER, command=lambda h=hrs: self._set_range(h))
+            b.pack(side="left", padx=2)
+            self._range_btns[hrs] = b
 
-        # Summary cards
-        self._cards_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self._cards_frame.pack(fill="x", padx=8, pady=4)
+        # Current level card
+        cur = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=12,
+                           border_width=1, border_color=BORDER2)
+        cur.pack(fill="x", padx=8, pady=4)
+        self._cur_val = _lbl(cur, "—", ("Segoe UI", 30, "bold"), TEXT)
+        self._cur_val.pack(side="left", padx=(16, 8), pady=12)
+        col = ctk.CTkFrame(cur, fg_color="transparent")
+        col.pack(side="left", pady=12)
+        self._cur_zone = _lbl(col, "", FONT_B, SUBTEXT)
+        self._cur_zone.pack(anchor="w")
+        self._cur_sub = _lbl(col, "", FONT_S, SUBTEXT)
+        self._cur_sub.pack(anchor="w")
 
-        self._card_front = self._make_card("Front Sensor",  BLUE)
-        self._card_back  = self._make_card("Back Sensor",   TEAL)
-        self._card_delta = self._make_card("Front/Back Δ",  SUBTEXT)
-        self._card_temp  = self._make_card("Temperature",   ORANGE)
-        self._card_day   = self._make_card("Run Day",       GOLD)
-
-        for card in (self._card_front, self._card_back,
-                     self._card_delta, self._card_temp, self._card_day):
-            card.pack(side="left", expand=True, fill="x", padx=4)
-
-        # Chart area
+        # Chart
         self._chart_outer = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=12,
                                          border_width=1, border_color=BORDER2)
         self._chart_outer.pack(fill="both", expand=True, padx=8, pady=4)
-
         if HAS_MPL:
             self._init_chart()
         else:
             _lbl(self._chart_outer,
-                 "Install matplotlib for trend charts:\n"
-                 "pip install matplotlib",
+                 "Install matplotlib for trend charts:\npip install matplotlib",
                  FONT_B, SUBTEXT).pack(expand=True, pady=40)
 
         # Bottom bar
         bb = ctk.CTkFrame(self, fg_color="transparent")
         bb.pack(fill="x", padx=8, pady=(4, 8))
-
-        # History selector
-        _lbl(bb, "View run:", FONT_S, SUBTEXT).pack(side="left", padx=(4, 4))
-        self._history_cb = ctk.CTkComboBox(
-            bb, values=["Active run"], width=200,
-            fg_color=CARD, border_color=BORDER, text_color=TEXT,
-            command=self._on_history_select)
-        self._history_cb.set("Active run")
-        self._history_cb.pack(side="left", padx=4)
-
-        _btn(bb, "Export CSV",   self._export_csv,   fg=BORDER, hover=CARD2,
+        _btn(bb, "Export CSV", self._export_csv, fg=CARD2, hover=BORDER,
              width=110, height=28).pack(side="right", padx=4)
-        _btn(bb, "Save Chart",   self._export_chart, fg=BORDER, hover=CARD2,
+        _btn(bb, "Save Chart", self._export_chart, fg=CARD2, hover=BORDER,
              width=110, height=28).pack(side="right", padx=4)
-        _btn(bb, "Refresh Now",  self.refresh,       fg=BORDER, hover=CARD2,
+        _btn(bb, "Refresh Now", self.refresh, fg=CARD2, hover=BORDER,
              width=110, height=28).pack(side="right", padx=4)
-
-    def _make_card(self, title: str, accent: str) -> ctk.CTkFrame:
-        card = ctk.CTkFrame(self._cards_frame, fg_color=CARD,
-                            corner_radius=10, border_width=1, border_color=BORDER)
-        _lbl(card, title, FONT_S, accent).pack(pady=(6, 0))
-        card._val_lbl   = _lbl(card, "—", FONT_M, TEXT)
-        card._val_lbl.pack()
-        card._badge_lbl = _lbl(card, "", FONT_S, SUBTEXT)
-        card._badge_lbl.pack(pady=(0, 6))
-        return card
-
-    def _update_card(self, card, value_text: str,
-                     badge_text: str, badge_color: str):
-        card._val_lbl.configure(text=value_text)
-        card._badge_lbl.configure(text=badge_text, text_color=badge_color)
-
-    # ── Chart initialisation ──────────────────────────────────────────────────
 
     def _init_chart(self):
         self._fig = Figure(figsize=(6, 2.8), facecolor=PANEL)
-        self._ax  = self._fig.add_subplot(111)
+        self._ax = self._fig.add_subplot(111)
         self._ax.set_facecolor(PANEL)
-        self._fig.subplots_adjust(left=0.08, right=0.97, top=0.92, bottom=0.14)
+        self._fig.subplots_adjust(left=0.08, right=0.97, top=0.94, bottom=0.18)
         self._canvas = FigureCanvasTkAgg(self._fig, master=self._chart_outer)
         self._canvas.get_tk_widget().pack(fill="both", expand=True, padx=4, pady=4)
 
-    # ── Refresh ───────────────────────────────────────────────────────────────
+    def _set_range(self, hours):
+        self._hours = hours
+        for h, b in self._range_btns.items():
+            on = (h == hours)
+            b.configure(fg_color=GOLD if on else CARD2,
+                        text_color="#1A1206" if on else SUBTEXT)
+        self.refresh()
+
+    # ── Refresh ────────────────────────────────────────────────────────────────
 
     def refresh(self):
         if self._after_id:
@@ -424,18 +476,12 @@ class VOCPanel(ctk.CTkFrame):
                 self.after_cancel(self._after_id)
             except Exception:
                 pass
-
-        self._active_run = voc_db.get_active_run(self.incubator_id)
-        if self._shown_run is None or (
-                self._shown_run.get("status") == "active"):
-            self._shown_run = self._active_run
-
-        self._update_run_bar()
-        self._update_history_dropdown()
-        self._update_cards()
+        p = self._preset()
+        self._unconf_lbl.configure(
+            text="" if p.get("confirmed") else "⚠ thresholds not confirmed")
+        self._update_current(p)
         if HAS_MPL:
-            self._update_chart()
-
+            self._update_chart(p)
         self._after_id = self.after(REFRESH_MS, self.refresh)
 
     def destroy(self):
@@ -446,263 +492,123 @@ class VOCPanel(ctk.CTkFrame):
                 pass
         super().destroy()
 
-    # ── Run bar ───────────────────────────────────────────────────────────────
-
-    def _update_run_bar(self):
-        run = self._active_run
-        if run:
-            start   = (run.get("start_time") or "")[:10]
-            days    = self._run_day(run)
-            txt     = f"Active: {run['chemical_name']}  |  Started: {start}  |  Day {days}"
-            self._run_info_lbl.configure(text=txt, text_color=GOLD)
-            self._end_btn.configure(state="normal")
-            snap = voc_db.run_snapshot(run)
-            preset = voc_db.get_preset(run.get("preset_id") or 0) or {}
-            if not preset.get("confirmed"):
-                self._unconf_lbl.configure(
-                    text="⚠ Preset not confirmed")
-            else:
-                self._unconf_lbl.configure(text="")
-        else:
-            self._run_info_lbl.configure(
-                text="No active run — click New Run to start", text_color=SUBTEXT)
-            self._end_btn.configure(state="disabled")
-            self._unconf_lbl.configure(text="")
-
-    @staticmethod
-    def _run_day(run: dict) -> int:
-        try:
-            start = datetime.fromisoformat(run["start_time"])
-            return max(1, (datetime.now() - start).days + 1)
-        except Exception:
-            return 1
-
-    # ── Summary cards ─────────────────────────────────────────────────────────
-
-    def _update_cards(self):
-        readings = voc_db.get_latest_readings(self.incubator_id)
-        run      = self._active_run
-        preset   = voc_db.run_snapshot(run) if run else {}
-
-        # Front
-        fr = readings.get("front")
-        if fr and fr.get("voc_ppm") is not None:
-            ppm = fr["voc_ppm"]
-            _, zlbl, zcol = voc_db.get_zone(ppm, preset)
-            self._update_card(self._card_front, f"{ppm:.3f}", zlbl, zcol)
-        else:
-            self._update_card(self._card_front, "—", "No data", SUBTEXT)
-
-        # Back
-        bk = readings.get("back")
-        if bk and bk.get("voc_ppm") is not None:
-            ppm = bk["voc_ppm"]
-            _, zlbl, zcol = voc_db.get_zone(ppm, preset)
-            self._update_card(self._card_back, f"{ppm:.3f}", zlbl, zcol)
-        else:
-            self._update_card(self._card_back, "—", "No data", SUBTEXT)
-
-        # Delta
-        if (fr and fr.get("voc_ppm") is not None and
-                bk and bk.get("voc_ppm") is not None):
-            delta = abs(fr["voc_ppm"] - bk["voc_ppm"])
-            dcol  = RED if delta > 0.10 else (AMBER if delta > 0.05 else GREEN)
-            self._update_card(self._card_delta, f"{delta:.3f}",
-                              "High Δ — check placement" if delta > 0.10 else "OK", dcol)
-        else:
-            self._update_card(self._card_delta, "—", "", SUBTEXT)
-
-        # Temperature (use whichever sensor has it)
-        temp_c = None
-        for r in (fr, bk):
-            if r and r.get("temp_c") is not None:
-                temp_c = r["temp_c"]
-                break
-        if temp_c is not None:
-            self._update_card(self._card_temp, f"{temp_c:.1f}°C", "", TEXT)
-        else:
-            self._update_card(self._card_temp, "—", "No data", SUBTEXT)
-
-        # Run day
-        if run:
-            day = self._run_day(run)
-            self._update_card(self._card_day, str(day), run["chemical_name"][:16], GOLD)
-        else:
-            self._update_card(self._card_day, "—", "No active run", SUBTEXT)
-
-    # ── Trend chart ───────────────────────────────────────────────────────────
-
-    def _update_chart(self):
-        if not HAS_MPL:
+    def _update_current(self, p):
+        if self._mode() == "off":
+            self._cur_val.configure(text="—", text_color=SUBTEXT)
+            self._cur_zone.configure(text="Incubator off", text_color=SUBTEXT)
+            self._cur_sub.configure(
+                text="VOC is not collected while the incubator is off.",
+                text_color=SUBTEXT)
             return
-        run = self._shown_run
-        if not run:
-            self._draw_empty_chart("No active run")
+        latest = voc_db.get_latest_readings(self.incubator_id).get("front")
+        if not latest or latest.get("voc_ppm") is None:
+            self._cur_val.configure(text="—", text_color=SUBTEXT)
+            self._cur_zone.configure(text="No readings yet", text_color=SUBTEXT)
+            self._cur_sub.configure(text="Waiting for sensor data…", text_color=SUBTEXT)
             return
-        readings = voc_db.get_run_readings(run["id"])
-        if not readings:
-            self._draw_empty_chart("No readings yet for this run")
-            return
+        ppm = latest["voc_ppm"]
+        _, zlbl, zcol = voc_db.get_zone(ppm, p)
+        self._cur_val.configure(text=f"{ppm:.3f}", text_color=zcol)
+        self._cur_zone.configure(text=f"{zlbl}  ·  ppm", text_color=zcol)
+        age = self._age_seconds(latest.get("timestamp"))
+        if age is None:
+            self._cur_sub.configure(text="", text_color=SUBTEXT)
+        else:
+            mins = int(age // 60)
+            when = "just now" if mins < 1 else f"{mins} min ago"
+            stale = age > 600
+            self._cur_sub.configure(
+                text=f"updated {when}" + (" · sensor may be offline" if stale else ""),
+                text_color=(AMBER if stale else SUBTEXT))
 
-        # Split by position
-        front = [(r["timestamp"], r["voc_ppm"]) for r in readings
-                 if r["position"] == "front" and r["voc_ppm"] is not None]
-        back  = [(r["timestamp"], r["voc_ppm"]) for r in readings
-                 if r["position"] == "back"  and r["voc_ppm"] is not None]
-
-        try:
-            start_dt = datetime.fromisoformat(run["start_time"])
-        except Exception:
-            start_dt = datetime.now()
-
-        def to_days(ts_str):
-            try:
-                return (datetime.fromisoformat(ts_str) - start_dt
-                        ).total_seconds() / 86400
-            except Exception:
-                return 0
-
-        fx = [to_days(t) for t, _ in front]
-        fy = [v for _, v in front]
-        bx = [to_days(t) for t, _ in back]
-        by = [v for _, v in back]
-
-        snap = voc_db.run_snapshot(run)
-        la   = snap.get("low_alert_ppm",  0.20)
-        lw   = snap.get("low_warn_ppm",   0.25)
-        hw   = snap.get("high_warn_ppm",  0.60)
-        ha   = snap.get("high_alert_ppm", 0.70)
-
+    def _update_chart(self, p):
+        rows = voc_db.get_recent_readings(self.incubator_id, self._hours)
+        pts = [(r["timestamp"], r["voc_ppm"]) for r in rows
+               if r.get("voc_ppm") is not None]
         ax = self._ax
         ax.clear()
-        ax.set_facecolor("#111827")
+        ax.set_facecolor(PANEL)
         for spine in ax.spines.values():
-            spine.set_edgecolor(BORDER)
+            spine.set_edgecolor(BORDER2)
         ax.tick_params(colors=SUBTEXT, labelsize=8)
-        ax.set_xlabel("Day of run", color=SUBTEXT, fontsize=8)
         ax.set_ylabel("VOC (ppm)", color=SUBTEXT, fontsize=8)
-        title = f"{run['chemical_name']}  —  "
-        title += "Active run" if run["status"] == "active" else \
-                 f"Ended {(run.get('end_time') or '')[:10]}"
-        ax.set_title(title, color=GOLD, fontsize=9, pad=4)
 
-        # Zone bands — determine y extent
-        all_y  = fy + by
-        y_max  = max(max(all_y) * 1.15, ha * 1.2, 0.80) if all_y else ha * 1.2
-        y_min  = 0.0
-
-        ax.axhspan(y_min, la,    facecolor="#EF4444", alpha=0.12, zorder=0)
-        ax.axhspan(la,    lw,    facecolor="#F59E0B", alpha=0.12, zorder=0)
-        ax.axhspan(lw,    hw,    facecolor="#10B981", alpha=0.14, zorder=0)
-        ax.axhspan(hw,    ha,    facecolor="#F59E0B", alpha=0.12, zorder=0)
-        ax.axhspan(ha,    y_max, facecolor="#EF4444", alpha=0.12, zorder=0)
-
-        # Zone boundary lines
-        for val, col in [(la, "#EF4444"), (lw, "#F59E0B"),
-                         (hw, "#F59E0B"), (ha, "#EF4444")]:
-            ax.axhline(val, color=col, linewidth=0.8, linestyle="--", alpha=0.6)
-
-        # Data lines
-        if fx:
-            ax.plot(fx, fy, color=BLUE,  linewidth=1.6,
-                    label="Front", marker=".", markersize=3, zorder=3)
-        if bx:
-            ax.plot(bx, by, color=TEAL,  linewidth=1.6,
-                    label="Back",  marker=".", markersize=3, zorder=3)
-
-        # Legend with zone labels
-        legend_labels = [
-            (f"Safe: {lw:.2f}–{hw:.2f} ppm",     "#10B981"),
-            (f"Warn: {la:.2f}–{lw:.2f} / {hw:.2f}–{ha:.2f}", "#F59E0B"),
-            (f"Alert: <{la:.2f} or >{ha:.2f}",    "#EF4444"),
-        ]
-        if fx or bx:
-            ax.legend(fontsize=7, facecolor="#1F2937",
-                      edgecolor=BORDER, labelcolor=TEXT,
-                      loc="upper left")
-
-        ax.set_ylim(y_min, y_max)
-        ax.grid(axis="y", color=BORDER, linewidth=0.4, alpha=0.5)
-        self._fig.canvas.draw_idle()
-
-    def _draw_empty_chart(self, msg: str):
-        ax = self._ax
-        ax.clear()
-        ax.set_facecolor("#111827")
-        for spine in ax.spines.values():
-            spine.set_edgecolor(BORDER)
-        ax.text(0.5, 0.5, msg, transform=ax.transAxes,
-                ha="center", va="center", color=SUBTEXT, fontsize=10)
-        self._fig.canvas.draw_idle()
-
-    # ── History dropdown ──────────────────────────────────────────────────────
-
-    def _update_history_dropdown(self):
-        runs = voc_db.get_runs(self.incubator_id)
-        self._run_list = runs
-        labels = []
-        for r in runs:
-            start = (r.get("start_time") or "")[:10]
-            tag   = "▶" if r["status"] == "active" else "■"
-            labels.append(f"{tag} {r['chemical_name']} ({start})")
-        if not labels:
-            labels = ["No runs yet"]
-        self._history_cb.configure(values=labels)
-        if self._shown_run:
-            for i, r in enumerate(runs):
-                if r["id"] == self._shown_run.get("id"):
-                    self._history_cb.set(labels[i])
-                    break
-
-    def _on_history_select(self, choice):
-        idx = self._history_cb.cget("values").index(choice)
-        if 0 <= idx < len(self._run_list):
-            self._shown_run = self._run_list[idx]
-            if HAS_MPL:
-                self._update_chart()
-
-    # ── Actions ───────────────────────────────────────────────────────────────
-
-    def _new_run(self):
-        NewRunDialog(self, self.incubator_id,
-                     on_save=lambda _: self.refresh())
-
-    def _end_run(self):
-        run = self._active_run
-        if not run:
+        if not pts:
+            ax.text(0.5, 0.5, "No readings in this range",
+                    transform=ax.transAxes, ha="center", va="center",
+                    color=SUBTEXT, fontsize=10)
+            self._fig.canvas.draw_idle()
             return
-        if messagebox.askyesno("End Run",
-                               f"End run '{run['chemical_name']}'?",
-                               parent=self):
-            voc_db.end_run(run["id"])
-            self.refresh()
 
-    def _open_presets(self):
-        PresetsManagerDialog(self, on_save=self.refresh)
+        # Build datetime series, breaking the line across gaps in the data
+        xs, ys, prev = [], [], None
+        for ts, ppm in pts:
+            try:
+                dt = datetime.fromisoformat(ts)
+            except Exception:
+                continue
+            if prev is not None and (dt - prev).total_seconds() > 1800:
+                xs.append(prev + (dt - prev) / 2)
+                ys.append(float("nan"))
+            xs.append(dt)
+            ys.append(ppm)
+            prev = dt
+
+        hw = p.get("high_warn_ppm", 0.60)
+        ha = p.get("high_alert_ppm", 0.70)
+        yvals = [v for v in ys if v == v]
+        y_max = max(max(yvals) * 1.15, ha * 1.25, 0.8) if yvals else ha * 1.25
+
+        # High-side threshold bands (low side is normal when not fumigating)
+        ax.axhspan(0,  hw,    facecolor="#10B981", alpha=0.10, zorder=0)
+        ax.axhspan(hw, ha,    facecolor="#F59E0B", alpha=0.14, zorder=0)
+        ax.axhspan(ha, y_max, facecolor="#EF4444", alpha=0.14, zorder=0)
+        ax.axhline(hw, color="#F59E0B", linewidth=0.9, linestyle="--", alpha=0.7)
+        ax.axhline(ha, color="#EF4444", linewidth=0.9, linestyle="--", alpha=0.7)
+
+        ax.plot(xs, ys, color="#FFD700", linewidth=1.8, zorder=3)
+        ax.set_ylim(0, y_max)
+        ax.grid(axis="y", color=BORDER2, linewidth=0.4, alpha=0.5)
+
+        if self._hours <= 24:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        elif self._hours <= 24 * 7:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%a %d"))
+        else:
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+        for lbl in ax.xaxis.get_majorticklabels():
+            lbl.set_rotation(0)
+        self._fig.canvas.draw_idle()
+
+    # ── Actions ────────────────────────────────────────────────────────────────
+
+    def _edit_thresholds(self):
+        p = self._preset()
+        if not p.get("id"):
+            voc_db.upsert_preset({"chemical_name": DDVP_NAME, "is_builtin": 1, **p})
+            p = self._preset()
+        PresetEditorDialog(self, preset=p, on_save=self.refresh,
+                           incubator_id=self.incubator_id)
 
     def _export_csv(self):
-        run = self._shown_run
-        if not run:
-            messagebox.showinfo("Export", "Select a run first.", parent=self)
+        rows = voc_db.get_recent_readings(self.incubator_id, self._hours)
+        if not rows:
+            messagebox.showinfo("Export", "No readings to export.", parent=self)
             return
         path = filedialog.asksaveasfilename(
-            title="Export Readings",
-            defaultextension=".csv",
+            title="Export VOC Readings", defaultextension=".csv",
             filetypes=[("CSV", "*.csv")],
-            initialfile=f"voc_run_{run['id']}_{run['chemical_name'].replace(' ','_')}.csv",
-        )
+            initialfile=f"voc_inc{self.incubator_id}_{self._hours}h.csv")
         if not path:
             return
-        readings = voc_db.get_run_readings(run["id"])
-        snap     = voc_db.run_snapshot(run)
+        p = self._preset()
         with open(path, "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
-            w.writerow(["timestamp", "position", "voc_ppm", "temp_c", "zone"])
-            for r in readings:
+            w.writerow(["timestamp", "voc_ppm", "temp_c", "zone"])
+            for r in rows:
                 ppm = r.get("voc_ppm")
-                _, zlbl, _ = voc_db.get_zone(ppm, snap)
-                w.writerow([r["timestamp"], r["position"],
-                             ppm, r.get("temp_c"), zlbl])
+                _, zlbl, _ = voc_db.get_zone(ppm, p)
+                w.writerow([r["timestamp"], ppm, r.get("temp_c"), zlbl])
         messagebox.showinfo("Exported", f"Saved to:\n{path}", parent=self)
 
     def _export_chart(self):
@@ -710,11 +616,9 @@ class VOCPanel(ctk.CTkFrame):
             messagebox.showinfo("Export", "No chart to export.", parent=self)
             return
         path = filedialog.asksaveasfilename(
-            title="Save Chart",
-            defaultextension=".png",
+            title="Save Chart", defaultextension=".png",
             filetypes=[("PNG", "*.png"), ("PDF", "*.pdf")],
-            initialfile="voc_trend_chart.png",
-        )
+            initialfile="voc_trend.png")
         if path:
             self._fig.savefig(path, dpi=150, bbox_inches="tight",
                               facecolor=self._fig.get_facecolor())
@@ -728,9 +632,10 @@ class VOCPanel(ctk.CTkFrame):
 class PresetsManagerDialog(ctk.CTkToplevel):
     """List + manage all chemical presets."""
 
-    def __init__(self, master, on_save=None):
+    def __init__(self, master, on_save=None, incubator_id=None):
         super().__init__(master)
         self.on_save = on_save
+        self.incubator_id = incubator_id
         self.title("Chemical Presets")
         self.geometry("620x500")
         self.grab_set()
@@ -785,7 +690,8 @@ class PresetsManagerDialog(ctk.CTkToplevel):
                      width=70, height=26, fg="#4B0000", hover=RED).pack(pady=2)
 
     def _edit(self, preset):
-        PresetEditorDialog(self, preset=preset, on_save=self._reload)
+        PresetEditorDialog(self, preset=preset, on_save=self._reload,
+                           incubator_id=self.incubator_id)
 
     def _reload(self):
         self._load()

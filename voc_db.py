@@ -107,6 +107,19 @@ def init_voc_tables():
                 sensor_serial   TEXT    DEFAULT ''
             );
 
+            -- App-authoritative device registry. Each physical sensor (Pi)
+            -- reports its stable hardware_id; the app owns name/incubator/
+            -- position so devices can be renamed/reassigned from the app.
+            CREATE TABLE IF NOT EXISTS voc_devices (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                hardware_id     TEXT    UNIQUE NOT NULL,
+                name            TEXT    DEFAULT '',
+                incubator_id    INTEGER REFERENCES incubators(id) ON DELETE SET NULL,
+                position        TEXT    DEFAULT 'front',
+                last_seen       TEXT,
+                created_at      TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS voc_runs (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 incubator_id    INTEGER REFERENCES incubators(id) ON DELETE CASCADE,
@@ -372,6 +385,121 @@ def get_recent_readings(incubator_id: int, hours: int = 24) -> list:
             ORDER BY timestamp""",
             (incubator_id, f"-{hours} hours")
         ).fetchall()]
+
+
+# ── Devices (app-authoritative registry) ──────────────────────────────────────
+
+def get_device_by_hw(hardware_id: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM voc_devices WHERE hardware_id=?",
+                           (hardware_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_devices() -> list:
+    """All registered devices, joined with incubator name, newest-seen first."""
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute("""
+            SELECT d.*, i.name AS incubator_name
+            FROM voc_devices d
+            LEFT JOIN incubators i ON d.incubator_id = i.id
+            ORDER BY (d.last_seen IS NULL), d.last_seen DESC, d.id""").fetchall()]
+
+
+def register_device(hardware_id: str, name: str = "",
+                    incubator_id: int | None = None,
+                    position: str | None = None) -> int:
+    """Insert a device if new (unassigned by default). Returns its id.
+    Seeds name/incubator/position only when the row is first created so an
+    app-side reassignment is never overwritten by the sensor's payload."""
+    now = datetime.now().isoformat()
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR IGNORE INTO voc_devices
+              (hardware_id, name, incubator_id, position, last_seen, created_at)
+            VALUES (?,?,?,?,?,?)""",
+            (hardware_id, name or "", incubator_id,
+             (position or "front"), now, now))
+        return conn.execute("SELECT id FROM voc_devices WHERE hardware_id=?",
+                           (hardware_id,)).fetchone()[0]
+
+
+def touch_device(hardware_id: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE voc_devices SET last_seen=? WHERE hardware_id=?",
+                     (datetime.now().isoformat(), hardware_id))
+
+
+def update_device(device_id: int, name: str = None,
+                  incubator_id: int | None = "__keep__",
+                  position: str = None):
+    """Edit a device's assignment from the app. Pass only the fields to change."""
+    sets, vals = [], []
+    if name is not None:
+        sets.append("name=?"); vals.append(name)
+    if incubator_id != "__keep__":
+        sets.append("incubator_id=?"); vals.append(incubator_id)
+    if position is not None:
+        sets.append("position=?"); vals.append(position)
+    if not sets:
+        return
+    vals.append(device_id)
+    with get_conn() as conn:
+        conn.execute(f"UPDATE voc_devices SET {', '.join(sets)} WHERE id=?", vals)
+
+
+def delete_device(device_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM voc_devices WHERE id=?", (device_id,))
+
+
+def suggest_thresholds(incubator_id: int, hours: int = 48,
+                       run_id: int | None = None) -> dict | None:
+    """Derive starting threshold values from real captured readings.
+
+    Returns {count, hours, baseline, median, p90, peak, suggested{la,lw,hw,ha}}
+    or None if there aren't enough readings. The suggested bands bracket the
+    sustained treatment level (the "OK" green zone) and are only a starting
+    point — the operator must adjust them to their actual protocol.
+    """
+    if run_id is not None:
+        rows = get_run_readings(run_id)
+    else:
+        rows = get_recent_readings(incubator_id, hours)
+    vals = sorted(r["voc_ppm"] for r in rows
+                  if isinstance(r.get("voc_ppm"), (int, float)))
+    if len(vals) < 5:
+        return None
+
+    def pct(p):
+        i = min(len(vals) - 1, max(0, int(round(p / 100 * (len(vals) - 1)))))
+        return vals[i]
+
+    baseline = pct(10)
+    median   = pct(50)
+    p90      = pct(90)
+    peak     = vals[-1]
+
+    # Sustained treatment level ≈ median of the upper half (treatment-on samples)
+    upper = vals[len(vals) // 2:]
+    plateau = upper[len(upper) // 2] if upper else median
+
+    la = round(max(baseline, plateau * 0.40), 3)
+    lw = round(plateau * 0.70, 3)
+    hw = round(plateau * 1.30, 3)
+    ha = round(min(plateau * 1.70, peak * 1.10), 3)
+    # Enforce strict ordering with small nudges if the data is very flat
+    step = max(0.001, round(plateau * 0.05, 3))
+    if lw <= la: lw = round(la + step, 3)
+    if hw <= lw: hw = round(lw + step, 3)
+    if ha <= hw: ha = round(hw + step, 3)
+
+    return {
+        "count": len(vals), "hours": hours,
+        "baseline": round(baseline, 3), "median": round(median, 3),
+        "p90": round(p90, 3), "peak": round(peak, 3),
+        "suggested": {"la": la, "lw": lw, "hw": hw, "ha": ha},
+    }
 
 
 # ── Alert events ──────────────────────────────────────────────────────────────

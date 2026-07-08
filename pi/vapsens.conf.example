@@ -10,17 +10,21 @@
 # with `tailscale ip -4` on that machine.
 APP_URL=http://100.x.y.z:5151
 
-# Which incubator this sensor is physically installed in (the app's incubator id).
-# Ask in the app / see the Incubators list. Example: Incubator 7 -> id 7.
-INCUBATOR_ID=7
-
 # --- Optional (sensible defaults if omitted) ---
 # Must match the app's Settings -> "voc_ingest_token". Leave blank if the app
 # has no token set (open ingest on the Tailscale network).
 INGEST_TOKEN=
 
-# Sensor slot in the app schema: front or back (single sensor -> front).
-POSITION=front
+# Incubator/position are now assigned FROM THE APP (Settings -> Vapona Sensors).
+# The Pi reports a stable HARDWARE_ID and the app maps it to an incubator and
+# slot, so you normally leave the two lines below blank/commented. They are used
+# only as a one-time seed if this device has never been seen by the app before.
+#INCUBATOR_ID=7
+#POSITION=front
+
+# Override the auto-detected hardware id (normally leave blank — the service
+# derives a stable id from the Pi serial / machine-id).
+#HARDWARE_ID=
 
 # Friendly identifier for this sensor (defaults to the Pi hostname).
 SENSOR_ID=vapsens-zi02
@@ -30,11 +34,12 @@ SERIAL_PORT=/dev/serial0
 BAUD=9600
 
 # Averaging window (seconds) — one stored/synced reading per window.
-# Sensor streams ~1 Hz; 30s keeps the DB tidy while staying responsive.
-SAMPLE_SECONDS=30
+# Sensor streams ~1 Hz; 900s (15 min) matches the temperature poll interval
+# and stores a smoothed 15-minute average. Lower it for finer resolution.
+SAMPLE_SECONDS=900
 
-# How often to push buffered readings to the app (seconds).
-SYNC_SECONDS=15
+# How often to check for / push new buffered readings to the app (seconds).
+SYNC_SECONDS=60
 
 # Drop already-synced buffer rows older than this many days.
 PRUNE_DAYS=14

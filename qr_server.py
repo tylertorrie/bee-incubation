@@ -1742,7 +1742,8 @@ def _incubator_trays_body(inc_id: int) -> str:
 # ── Auth (shared passcode) ────────────────────────────────────────────────────
 
 # Paths reachable without logging in (login page, health, machine/ESP32 endpoints)
-_AUTH_EXEMPT = ("/m/login", "/health", "/reading", "/api/readings", "/api/status")
+_AUTH_EXEMPT = ("/m/login", "/health", "/reading", "/api/readings", "/api/status",
+                "/api/device")
 
 # Simple in-memory brute-force throttle: ip -> [fail_count, locked_until_ts]
 _auth_fails: dict = {}
@@ -2261,14 +2262,45 @@ def _make_flask_app():
             return jsonify({"error": "invalid ingest token"}), 401
 
         data = request.get_json(silent=True) or {}
-        inc_id   = data.get("incubator_id")
-        position = data.get("position", "front")
-        if inc_id is None:
-            return jsonify({"error": "incubator_id required"}), 400
+
+        # App-authoritative device mapping. A sensor identifies by its stable
+        # hardware_id; the app owns which incubator/position it's assigned to.
+        # Unknown devices auto-register (unassigned) so they appear in the app
+        # to be assigned. Legacy payloads without hardware_id fall back to the
+        # incubator_id/position sent directly (the original single-Pi format).
+        hw = (data.get("hardware_id") or data.get("device_id") or "").strip()
+        if hw:
+            _vdb.touch_device(hw)
+            dev = _vdb.get_device_by_hw(hw)
+            if dev is None:
+                _vdb.register_device(
+                    hw, name=(data.get("sensor_id") or ""),
+                    incubator_id=data.get("incubator_id"),
+                    position=data.get("position"))
+                dev = _vdb.get_device_by_hw(hw)
+            inc_id   = dev.get("incubator_id")
+            position = dev.get("position") or "front"
+            if inc_id is None:
+                # Seen but not yet assigned to an incubator — nowhere to store.
+                return jsonify({"ok": True, "accepted": 0,
+                                "skipped": "device unassigned"})
+        else:
+            inc_id   = data.get("incubator_id")
+            position = data.get("position", "front")
+            if inc_id is None:
+                return jsonify({"error": "incubator_id or hardware_id required"}), 400
         try:
             inc_id = int(inc_id)
         except (ValueError, TypeError) as exc:
             return jsonify({"error": str(exc)}), 400
+
+        # Collect only while the incubator is ON (like the Govee temp poller,
+        # which skips 'off' incubators). The Pi keeps streaming/buffering; the
+        # app just drops readings for an incubator that's turned off.
+        inc = next((i for i in db.get_incubators(include_hidden=True)
+                    if i["id"] == inc_id), None)
+        if inc is not None and (inc.get("temp_mode") or "incubation") == "off":
+            return jsonify({"ok": True, "accepted": 0, "skipped": "incubator off"})
 
         # Normalise to a list of {voc_ppm, temp_c, ts, position?}
         is_batch = isinstance(data.get("readings"), list)
@@ -2281,9 +2313,11 @@ def _make_flask_app():
         if not items:
             return jsonify({"error": "no readings"}), 400
 
-        run    = _vdb.get_active_run(inc_id)
-        run_id = run["id"] if run else None
-        snap   = _vdb.run_snapshot(run) if run else None
+        # Continuous collection — readings are tied to the incubator, not a run.
+        # Vapona is the only chemical used, so alerts check the fixed DDVP
+        # thresholds, and we alert HIGH side only (low VOC is normal when not
+        # fumigating).
+        ddvp = _vdb.get_preset_by_name("DDVP (Vapona)")
 
         accepted = 0
         for it in items:
@@ -2298,19 +2332,40 @@ def _make_flask_app():
                 temp = None
             pos = it.get("position") or position
             ts  = it.get("ts")
-            _vdb.save_reading(inc_id, run_id, pos, ppm, temp, timestamp=ts)
+            _vdb.save_reading(inc_id, None, pos, ppm, temp, timestamp=ts)
             accepted += 1
-            # Alert only for near-real-time single readings, not backfilled batches
-            if run and snap and not is_batch:
-                zone_key, zone_lbl, _ = _vdb.get_zone(ppm, snap)
-                if zone_key not in ("ok", "no_data"):
-                    msg = (f"{zone_lbl}: {pos} sensor {ppm:.3f} ppm "
-                           f"in {run['chemical_name']}")
-                    _vdb.log_alert_event(inc_id, run_id, pos, ppm, zone_key, msg)
+            # High-side alerts on near-real-time readings only (not backfill)
+            if ddvp and not is_batch:
+                zone_key, zone_lbl, _ = _vdb.get_zone(ppm, ddvp)
+                if zone_key in ("high", "critical_high"):
+                    msg = f"{zone_lbl} VOC: {ppm:.3f} ppm (Vapona)"
+                    _vdb.log_alert_event(inc_id, None, pos, ppm, zone_key, msg)
 
         if accepted and _on_update:
             _on_update(None)
-        return jsonify({"ok": True, "run_id": run_id, "accepted": accepted})
+        return jsonify({"ok": True, "accepted": accepted})
+
+    @app.route("/api/device/<hardware_id>/config")
+    def device_config(hardware_id):
+        """Return a device's app-assigned config. A previously-unknown device
+        auto-registers (unassigned) on first poll so it shows up in the app."""
+        if not _voc_available:
+            return jsonify({"error": "voc_db not available"}), 503
+        hardware_id = (hardware_id or "").strip()
+        if not hardware_id:
+            return jsonify({"error": "hardware_id required"}), 400
+        _vdb.touch_device(hardware_id)
+        dev = _vdb.get_device_by_hw(hardware_id)
+        if dev is None:
+            _vdb.register_device(hardware_id)
+            dev = _vdb.get_device_by_hw(hardware_id)
+        return jsonify({
+            "hardware_id":  hardware_id,
+            "name":         dev.get("name") or "",
+            "incubator_id": dev.get("incubator_id"),
+            "position":     dev.get("position") or "front",
+            "assigned":     dev.get("incubator_id") is not None,
+        })
 
     @app.route("/api/readings")
     def api_readings():

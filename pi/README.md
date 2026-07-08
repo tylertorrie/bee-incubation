@@ -50,7 +50,7 @@ sudo cp zi02_service.py /opt/vapsens/
 sudo cp vapsens.conf.example /etc/vapsens/vapsens.conf
 sudo cp vapsens.service /etc/systemd/system/
 
-sudo nano /etc/vapsens/vapsens.conf     # set APP_URL, INCUBATOR_ID, (INGEST_TOKEN)
+sudo nano /etc/vapsens/vapsens.conf     # set APP_URL (and INGEST_TOKEN if used)
 
 pip3 install pyserial                    # if not already installed
 sudo usermod -aG dialout incu1nvap       # serial access (once)
@@ -69,24 +69,29 @@ You should see lines like:
 stored 0.412 ppm (avg of 30 samples)
 synced 2 reading(s); 0 pending
 ```
-Then in the app, start a VOC run for that incubator and open the **VOC Monitor**
-tab on its detail screen — readings will appear.
+Then in the app go to **Settings ▸ Vapona Sensors**. The new sensor appears
+automatically (identified by its hardware ID). Assign it to an incubator and
+position and Save — readings then show on that incubator's **Vapona Monitor**
+tab whenever the incubator is on.
 
 ## Config reference
 See `vapsens.conf.example` — every option is documented there. Key ones:
 - `APP_URL` — the app computer's Tailscale address + `:5151`
-- `INCUBATOR_ID` — which incubator this sensor is in
 - `INGEST_TOKEN` — must match the app setting (or blank on both)
-- `POSITION` — `front` (single sensor) or `back`
-- `SAMPLE_SECONDS` — averaging window (default 30s)
+- `HARDWARE_ID` — auto-detected from the Pi; normally leave blank. The app maps
+  this id → incubator/position (assign it under **Settings ▸ Vapona Sensors**).
+- `INCUBATOR_ID` / `POSITION` — optional one-time seed only, used if the app has
+  never seen this device before. Assignment is owned by the app thereafter.
+- `SAMPLE_SECONDS` — averaging window (default 900s / 15 min)
 
 ## Troubleshooting
 | Symptom | Fix |
 |---|---|
 | `app unreachable` in the log | App not open, or Tailscale down. Data keeps buffering — it'll catch up. |
-| `app rejected batch` | Token mismatch, or `INCUBATOR_ID` doesn't exist. Check the app's `voc_ingest_token`. |
+| `app rejected batch` | Token mismatch. Check the app's `voc_ingest_token` matches `INGEST_TOKEN`. |
 | `serial open failed` | Check wiring / `enable_uart=1` / user in `dialout` group. |
-| No readings in app | Confirm a VOC **run** is active for that incubator; readings still store without a run but attach to no run. |
+| `skipped: device unassigned` | Assign the sensor to an incubator under **Settings ▸ Vapona Sensors**. |
+| No readings in app | Confirm the incubator is **on** (readings are only stored when it is, like the temp sensors). |
 
 ## Notes
 - The ZI02 has **no temperature output**, so `temp_c` is sent as null; the app
