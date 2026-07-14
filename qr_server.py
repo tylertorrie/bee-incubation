@@ -2359,13 +2359,26 @@ def _make_flask_app():
         if dev is None:
             _vdb.register_device(hardware_id)
             dev = _vdb.get_device_by_hw(hardware_id)
-        return jsonify({
+        out = {
             "hardware_id":  hardware_id,
             "name":         dev.get("name") or "",
             "incubator_id": dev.get("incubator_id"),
             "position":     dev.get("position") or "front",
             "assigned":     dev.get("incubator_id") is not None,
-        })
+        }
+        # Wi-Fi networks contain passwords, so they are only handed out when the
+        # request is authenticated. If an ingest token is configured it must
+        # match; if none is set (open Tailscale network) they're included too.
+        _tok = (db.get_setting("voc_ingest_token", "") or "").strip()
+        _authed = (not _tok) or (
+            request.headers.get("X-Ingest-Token", "").strip() == _tok)
+        if _authed:
+            out["wifi"] = [
+                {"ssid": w["ssid"], "psk": w.get("psk") or "",
+                 "priority": w.get("priority") or 0}
+                for w in _vdb.get_wifi_networks()
+            ]
+        return jsonify(out)
 
     @app.route("/api/readings")
     def api_readings():

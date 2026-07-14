@@ -83,6 +83,22 @@ See `vapsens.conf.example` — every option is documented there. Key ones:
 - `INCUBATOR_ID` / `POSITION` — optional one-time seed only, used if the app has
   never seen this device before. Assignment is owned by the app thereafter.
 - `SAMPLE_SECONDS` — averaging window (default 900s / 15 min)
+- `WIFI_MANAGE` — `1` to let the app provision Wi-Fi networks (default), `0` to disable
+
+## Wi-Fi provisioning
+Each incubator has its own Wi-Fi network. Rather than reflashing a sensor when
+you move it, the app holds the master list of networks (**Settings ▸ Vapona
+Sensors ▸ Sensor Wi-Fi Networks**) and every sensor is provisioned with **all**
+of them. NetworkManager then auto-connects to whichever network is in range, so
+moving a sensor between incubators needs no reconfiguration.
+
+- The service only **adds/updates** NetworkManager profiles (named `vapwifi-*`)
+  — it never deletes the connection a Pi is currently using, so a bad password
+  can't strand a sensor.
+- Networks are fetched every `CONFIG_SECONDS` (default 5 min). Passwords are only
+  sent when the request carries the correct `INGEST_TOKEN` (set one in the app's
+  Settings so credentials aren't served openly).
+- Requires passwordless `sudo nmcli` on the Pi (already configured on `vapsens`).
 
 ## Troubleshooting
 | Symptom | Fix |

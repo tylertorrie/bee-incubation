@@ -156,6 +156,18 @@ def init_voc_tables():
                 timestamp       TEXT,
                 acknowledged    INTEGER DEFAULT 0
             );
+
+            -- Wi-Fi networks the sensors should know about. Every Pi is
+            -- provisioned with ALL of these; NetworkManager auto-joins whichever
+            -- is in range, so moving a sensor between incubators needs no config.
+            CREATE TABLE IF NOT EXISTS wifi_networks (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ssid            TEXT    UNIQUE NOT NULL,
+                psk             TEXT    DEFAULT '',
+                priority        INTEGER DEFAULT 0,
+                label           TEXT    DEFAULT '',
+                created_at      TEXT
+            );
         """)
         for p in DEFAULT_PRESETS:
             conn.execute("""
@@ -451,6 +463,44 @@ def update_device(device_id: int, name: str = None,
 def delete_device(device_id: int):
     with get_conn() as conn:
         conn.execute("DELETE FROM voc_devices WHERE id=?", (device_id,))
+
+
+# ── Wi-Fi networks (provisioned to every sensor) ──────────────────────────────
+
+def get_wifi_networks() -> list:
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM wifi_networks ORDER BY priority DESC, ssid"
+        ).fetchall()]
+
+
+def upsert_wifi_network(ssid: str, psk: str = "", priority: int = 0,
+                        label: str = "", net_id: int | None = None) -> int:
+    """Add or update a network (unique by SSID). Returns its id."""
+    ssid = (ssid or "").strip()
+    if not ssid:
+        raise ValueError("SSID is required")
+    now = datetime.now().isoformat()
+    with get_conn() as conn:
+        if net_id:
+            conn.execute(
+                "UPDATE wifi_networks SET ssid=?, psk=?, priority=?, label=? "
+                "WHERE id=?", (ssid, psk or "", priority, label or "", net_id))
+            return net_id
+        conn.execute("""
+            INSERT INTO wifi_networks (ssid, psk, priority, label, created_at)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(ssid) DO UPDATE SET
+                psk=excluded.psk, priority=excluded.priority,
+                label=excluded.label""",
+            (ssid, psk or "", priority, label or "", now))
+        return conn.execute("SELECT id FROM wifi_networks WHERE ssid=?",
+                            (ssid,)).fetchone()[0]
+
+
+def delete_wifi_network(net_id: int):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM wifi_networks WHERE id=?", (net_id,))
 
 
 def suggest_thresholds(incubator_id: int, hours: int = 48,

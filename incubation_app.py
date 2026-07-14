@@ -66,7 +66,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.43.2"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.44.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -1058,6 +1058,117 @@ class _VocDeviceManager(ctk.CTkToplevel):
             except Exception:
                 pass
         self.destroy()
+
+
+class _WifiNetworkManager(ctk.CTkToplevel):
+    """Manage the Wi-Fi networks pushed to every Vapona sensor. Every Pi is
+    provisioned with all of these, so moving a sensor between incubators (each
+    on its own network) needs no reconfiguration — it auto-joins whichever is
+    in range."""
+
+    def __init__(self, master):
+        super().__init__(master, fg_color=BG)
+        self.title("Sensor Wi-Fi Networks")
+        self.geometry("620x480")
+        self.grab_set()
+        self._build()
+
+    def _build(self):
+        top = ctk.CTkFrame(self, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(12, 4))
+        _label(top, "Sensor Wi-Fi Networks", FONT_H, GOLD).pack(side="left")
+        _btn(top, "+ Add Network", self._add, fg=GREEN, hover="#15803D",
+             text_color="white", width=130).pack(side="right")
+        _label(self, "Each incubator's network. All sensors receive every network "
+                     "and auto-connect to whichever is in range.\n"
+                     "Note: passwords are stored in the shared database.",
+               FONT_S, SUBTEXT).pack(anchor="w", padx=18, pady=(0, 4))
+        self._scroll = ctk.CTkScrollableFrame(self, fg_color=CARD)
+        self._scroll.pack(fill="both", expand=True, padx=12, pady=8)
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.pack(fill="x", padx=16, pady=(0, 12))
+        _btn(btns, "Save", self._save, fg=DK_GOLD, hover=GOLD,
+             text_color="black", width=120).pack(side="right", padx=4)
+        _btn(btns, "Close", self.destroy, width=100).pack(side="right")
+        self._load()
+
+    def _load(self):
+        for w in self._scroll.winfo_children():
+            w.destroy()
+        self._rows = []
+        nets = voc_db.get_wifi_networks()
+        # Column headers
+        hdr = ctk.CTkFrame(self._scroll, fg_color="transparent")
+        hdr.pack(fill="x", padx=4, pady=(2, 0))
+        for txt, w in (("SSID", 170), ("Password", 170), ("Priority", 70), ("", 40)):
+            _label(hdr, txt, FONT_S, SUBTEXT, width=w, anchor="w").pack(
+                side="left", padx=4)
+        if not nets:
+            _label(self._scroll, "No networks yet — click “+ Add Network”.",
+                   FONT_S, SUBTEXT).pack(pady=16)
+        for n in nets:
+            self._row_widget(n)
+
+    def _row_widget(self, n):
+        row = ctk.CTkFrame(self._scroll, fg_color=CARD2, corner_radius=6)
+        row.pack(fill="x", padx=4, pady=3)
+        ssid_e = ctk.CTkEntry(row, width=170, fg_color=CARD,
+                              border_color=BORDER, text_color=TEXT)
+        ssid_e.pack(side="left", padx=4, pady=6)
+        ssid_e.insert(0, n.get("ssid") or "")
+        psk_e = ctk.CTkEntry(row, width=170, fg_color=CARD, show="•",
+                             border_color=BORDER, text_color=TEXT)
+        psk_e.pack(side="left", padx=4, pady=6)
+        psk_e.insert(0, n.get("psk") or "")
+        prio_e = ctk.CTkEntry(row, width=60, fg_color=CARD,
+                              border_color=BORDER, text_color=TEXT)
+        prio_e.pack(side="left", padx=4, pady=6)
+        prio_e.insert(0, str(n.get("priority") or 0))
+        # Reveal/hide password
+        def _toggle(e=psk_e, b=None):
+            e.configure(show="" if e.cget("show") else "•")
+        _btn(row, "👁", lambda: _toggle(), width=32, height=26,
+             fg=BORDER, hover=CARD).pack(side="left", padx=(0, 2))
+        _btn(row, "🗑", lambda nid=n.get("id"): self._delete(nid),
+             width=32, height=26, fg=BORDER, hover=RED,
+             text_color="white").pack(side="left", padx=(2, 6))
+        self._rows.append((n.get("id"), ssid_e, psk_e, prio_e))
+
+    def _add(self):
+        # Persist current edits, then append a blank row
+        self._save(silent=True)
+        voc_db.upsert_wifi_network(ssid=f"New Network {len(self._rows)+1}")
+        self._load()
+
+    def _save(self, silent=False):
+        seen = set()
+        for nid, ssid_e, psk_e, prio_e in self._rows:
+            ssid = ssid_e.get().strip()
+            if not ssid or ssid in seen:
+                continue
+            seen.add(ssid)
+            try:
+                prio = int(prio_e.get().strip() or "0")
+            except ValueError:
+                prio = 0
+            voc_db.upsert_wifi_network(ssid=ssid, psk=psk_e.get(),
+                                       priority=prio, net_id=nid)
+        if not silent:
+            messagebox.showinfo("Sensor Wi-Fi",
+                "Networks saved. Sensors pick up changes within a few minutes.",
+                parent=self)
+            self._load()
+
+    def _delete(self, nid):
+        if not nid:
+            return
+        if messagebox.askyesno(
+                "Delete network", "Remove this Wi-Fi network?\n\n"
+                "Sensors keep any profile already installed until they are "
+                "reprovisioned or reflashed.", parent=self):
+            voc_db.delete_wifi_network(nid)
+            self._load()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3149,9 +3260,13 @@ class IncubationApp(ctk.CTk):
                    "here (the app is authoritative — the Pi does not decide).",
                FONT_S, SUBTEXT).grid(row=0, column=0, columnspan=2, sticky="w",
                                      padx=4, pady=(0, 6))
-        _btn(vf, "Manage Vapona Sensors", self._manage_voc_devices,
-             fg=BLUE, hover="#1D4ED8", text_color="white", width=200).grid(
-                 row=1, column=0, sticky="w", padx=4, pady=4)
+        _vbtns = ctk.CTkFrame(vf, fg_color="transparent")
+        _vbtns.grid(row=1, column=0, columnspan=2, sticky="w", padx=0, pady=4)
+        _btn(_vbtns, "Manage Vapona Sensors", self._manage_voc_devices,
+             fg=BLUE, hover="#1D4ED8", text_color="white", width=200).pack(
+                 side="left", padx=4)
+        _btn(_vbtns, "Sensor Wi-Fi Networks", self._manage_wifi_networks,
+             fg=CARD2, hover=BORDER, width=180).pack(side="left", padx=4)
         self._voc_dev_status_lbl = _label(vf, "", FONT_S, SUBTEXT)
         self._voc_dev_status_lbl.grid(row=2, column=0, columnspan=2, sticky="w",
                                       padx=4, pady=2)
@@ -3501,6 +3616,9 @@ class IncubationApp(ctk.CTk):
 
     def _manage_voc_devices(self):
         _VocDeviceManager(self, on_close=self._refresh_voc_dev_status)
+
+    def _manage_wifi_networks(self):
+        _WifiNetworkManager(self)
 
     def _refresh_poller_status(self):
         import json, socket

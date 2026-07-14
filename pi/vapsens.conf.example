@@ -41,6 +41,15 @@ SAMPLE_SECONDS=900
 # How often to check for / push new buffered readings to the app (seconds).
 SYNC_SECONDS=60
 
+# How often to fetch config from the app and provision Wi-Fi networks (seconds).
+CONFIG_SECONDS=300
+
+# Wi-Fi provisioning: the app holds the list of incubator networks and this
+# service adds them all to NetworkManager (autoconnect), so moving a sensor
+# between incubators needs no reconfiguration. Set to 0 to disable.
+WIFI_MANAGE=1
+WIFI_IFACE=wlan0
+
 # Drop already-synced buffer rows older than this many days.
 PRUNE_DAYS=14
 

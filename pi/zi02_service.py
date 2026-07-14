@@ -22,6 +22,7 @@ import json
 import signal
 import socket
 import sqlite3
+import subprocess
 import threading
 import urllib.request
 import urllib.error
@@ -70,6 +71,9 @@ SERIAL_PORT    = _env("SERIAL_PORT", "/dev/serial0")
 BAUD           = int(_env("BAUD", "9600"))
 SAMPLE_SECONDS = int(_env("SAMPLE_SECONDS", "30"))     # averaging window per stored reading
 SYNC_SECONDS   = int(_env("SYNC_SECONDS", "15"))       # how often to push to the app
+CONFIG_SECONDS = int(_env("CONFIG_SECONDS", "300"))    # how often to fetch config / provision wifi
+WIFI_MANAGE    = _env("WIFI_MANAGE", "1") not in ("0", "false", "no")
+WIFI_IFACE     = _env("WIFI_IFACE", "wlan0")
 BATCH_MAX      = int(_env("BATCH_MAX", "500"))         # max readings per POST
 PRUNE_DAYS     = int(_env("PRUNE_DAYS", "14"))         # drop synced rows older than this
 BUFFER_DB      = _env("BUFFER_DB", "/var/lib/vapsens/buffer.db")
@@ -198,6 +202,105 @@ def reader_loop(buf):
             pass
 
 
+# ── Config fetch + Wi-Fi provisioning ─────────────────────────────────────────
+
+def _fetch_config():
+    """GET this device's config from the app (assignment + wifi list)."""
+    url = f"{APP_URL}/api/device/{HARDWARE_ID}/config"
+    req = urllib.request.Request(url)
+    if INGEST_TOKEN:
+        req.add_header("X-Ingest-Token", INGEST_TOKEN)
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        return json.loads(resp.read() or b"{}")
+
+
+def _nmcli(*args, check=False):
+    return subprocess.run(["sudo", "-n", "nmcli", *args],
+                          capture_output=True, text=True, timeout=30, check=check)
+
+
+def _existing_wifi_ssids():
+    """Map of NetworkManager connection-name -> SSID for all wifi profiles."""
+    out = {}
+    r = _nmcli("-t", "-f", "NAME,TYPE", "connection", "show")
+    for line in r.stdout.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 2 and "wireless" in parts[1]:
+            name = parts[0]
+            s = _nmcli("-g", "802-11-wireless.ssid", "connection", "show", name)
+            out[name] = s.stdout.strip()
+    return out
+
+
+def _provision_wifi(networks):
+    """Ensure every app-defined network exists as an autoconnect NM profile.
+
+    We only ADD or UPDATE profiles — never delete — so the connection the Pi is
+    currently using can never be removed out from under it. NetworkManager then
+    auto-joins whichever known network is in range, so physically moving a
+    sensor between incubators needs no reconfiguration.
+    """
+    if not networks:
+        return
+    try:
+        existing = _existing_wifi_ssids()
+    except Exception as exc:
+        log(f"wifi: could not list connections ({exc}); skipping")
+        return
+    ssid_to_name = {v: k for k, v in existing.items()}
+
+    for net in networks:
+        ssid = (net.get("ssid") or "").strip()
+        if not ssid:
+            continue
+        psk = net.get("psk") or ""
+        prio = str(net.get("priority") or 0)
+        managed = f"vapwifi-{ssid}"
+        try:
+            if managed in existing:
+                # Our profile already exists — keep its password/priority current
+                if psk:
+                    _nmcli("connection", "modify", managed,
+                           "wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", psk,
+                           "connection.autoconnect-priority", prio)
+                else:
+                    _nmcli("connection", "modify", managed,
+                           "wifi-sec.key-mgmt", "none",
+                           "connection.autoconnect-priority", prio)
+            elif ssid in ssid_to_name:
+                # Some other profile (e.g. the initial netplan one) already
+                # covers this SSID — leave it alone to avoid duplicates.
+                continue
+            else:
+                add = ["connection", "add", "type", "wifi", "ifname", WIFI_IFACE,
+                       "con-name", managed, "ssid", ssid,
+                       "connection.autoconnect", "yes",
+                       "connection.autoconnect-priority", prio]
+                if psk:
+                    add += ["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", psk]
+                r = _nmcli(*add)
+                if r.returncode == 0:
+                    log(f"wifi: added network '{ssid}'")
+                else:
+                    log(f"wifi: add '{ssid}' failed: {r.stderr.strip()}")
+        except Exception as exc:
+            log(f"wifi: error provisioning '{ssid}' ({exc})")
+
+
+def config_loop():
+    """Periodically fetch config and provision any wifi networks."""
+    while not _stop.is_set():
+        try:
+            cfg = _fetch_config()
+            if WIFI_MANAGE:
+                _provision_wifi(cfg.get("wifi") or [])
+        except urllib.error.URLError as exc:
+            log(f"config: app unreachable ({getattr(exc, 'reason', exc)})")
+        except Exception as exc:
+            log(f"config: error ({exc})")
+        _stop.wait(CONFIG_SECONDS)
+
+
 # ── Syncer (buffer → app HTTP) ────────────────────────────────────────────────
 
 def _post_batch(rows):
@@ -262,12 +365,15 @@ def main():
 
     t_read = threading.Thread(target=reader_loop, args=(buf,), daemon=True)
     t_sync = threading.Thread(target=syncer_loop, args=(buf,), daemon=True)
+    t_cfg  = threading.Thread(target=config_loop, daemon=True)
     t_read.start()
     t_sync.start()
+    t_cfg.start()
     while not _stop.is_set():
         _stop.wait(1)
     t_read.join(timeout=5)
     t_sync.join(timeout=5)
+    t_cfg.join(timeout=5)
     log("stopped")
 
 
