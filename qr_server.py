@@ -451,6 +451,32 @@ def _dashboard_body() -> str:
     )
 
 
+# Break a chart line when consecutive readings are more than this far apart, so
+# a stretch of missing data (sensor offline / incubator off) shows as a gap
+# instead of a misleading straight diagonal. Poll cadence is 15 min.
+_CHART_GAP_SEC = 2700  # 45 minutes
+
+
+def _svg_line_path(series, X, Y, gap_sec: float = _CHART_GAP_SEC) -> str:
+    """Build an SVG path 'd' string that lifts the pen across data gaps.
+
+    series: list of (datetime, value|None) in time order. A None value or a
+    time jump greater than gap_sec starts a new sub-path (visual break).
+    """
+    parts, prev, pen_up = [], None, True
+    for t, v in series:
+        if prev is not None and (t.timestamp() - prev) > gap_sec:
+            pen_up = True
+        if v is None:
+            pen_up = True
+            prev = t.timestamp()
+            continue
+        parts.append(("M" if pen_up else "L") + f"{X(t):.1f},{Y(v):.1f}")
+        pen_up = False
+        prev = t.timestamp()
+    return " ".join(parts)
+
+
 def _svg_chart(readings: list, unit: str, t_min, t_max,
                goal_t=None, goal_h=None) -> str:
     """Self-contained inline SVG temp+humidity chart (no JS library).
@@ -529,16 +555,16 @@ def _svg_chart(readings: list, unit: str, t_min, t_max,
         goal_lines += (f'<line x1="{padL}" y1="{gyh:.1f}" x2="{padL+plotW}" y2="{gyh:.1f}" '
                        f'stroke="#60A5FA" stroke-width="1.2" stroke-dasharray="1,3"/>')
 
-    temp_pts = " ".join(f"{X(t):.1f},{Yt(v):.1f}" for t, v, _ in pts if v is not None)
-    hum_pts  = " ".join(f"{X(t):.1f},{Yh(v):.1f}" for t, _, v in pts if v is not None)
+    temp_d = _svg_line_path([(t, v) for t, v, _ in pts], X, Yt)
+    hum_d  = _svg_line_path([(t, v) for t, _, v in pts], X, Yh)
 
     return (
         f'<svg viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="none" '
         f'style="background:#111827;border-radius:10px">'
         + band + goal_lines +
-        f'<polyline points="{hum_pts}" fill="none" stroke="#60A5FA" '
+        f'<path d="{hum_d}" fill="none" stroke="#60A5FA" '
         f'stroke-width="1.4" stroke-dasharray="3,3" opacity="0.85"/>'
-        f'<polyline points="{temp_pts}" fill="none" stroke="#FFD700" stroke-width="2"/>'
+        f'<path d="{temp_d}" fill="none" stroke="#FFD700" stroke-width="2"/>'
         f'<text x="{padL+2}" y="{padT+10}" fill="#FFD700" font-size="11">{thi:.0f}°{unit}</text>'
         f'<text x="{padL+2}" y="{padT+plotH-2}" fill="#FFD700" font-size="11">{tlo:.0f}°{unit}</text>'
         f'<text x="{W-padR-2}" y="{padT+10}" fill="#60A5FA" font-size="11" text-anchor="end">{hhi:.0f}%</text>'
@@ -599,7 +625,7 @@ def _svg_voc_chart(readings: list, hw: float = 0.60, ha: float = 0.70) -> str:
                 f'height="{max(0, y2 - y1):.1f}" fill="{color}" opacity="0.12"/>')
 
     bands = band(0, hw, "#10B981") + band(hw, ha, "#F59E0B") + band(ha, ymax, "#EF4444")
-    line = " ".join(f"{X(t):.1f},{Y(v):.1f}" for t, v in pts)
+    line_d = _svg_line_path(pts, X, Y)
     return (
         f'<svg viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="none" '
         f'style="background:#111827;border-radius:10px">'
@@ -608,7 +634,7 @@ def _svg_voc_chart(readings: list, hw: float = 0.60, ha: float = 0.70) -> str:
           f'stroke="#F59E0B" stroke-width="1" stroke-dasharray="2,3"/>'
         + f'<line x1="{padL}" y1="{Y(ha):.1f}" x2="{padL+plotW}" y2="{Y(ha):.1f}" '
           f'stroke="#EF4444" stroke-width="1" stroke-dasharray="2,3"/>'
-        + f'<polyline points="{line}" fill="none" stroke="#FFD700" stroke-width="2"/>'
+        + f'<path d="{line_d}" fill="none" stroke="#FFD700" stroke-width="2"/>'
         + f'<text x="{padL+2}" y="{padT+10}" fill="#9CA3AF" font-size="11">{ymax:.2f} ppm</text>'
         + f'<text x="{padL+2}" y="{padT+plotH-2}" fill="#9CA3AF" font-size="11">0</text>'
         + '</svg>'
