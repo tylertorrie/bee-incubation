@@ -156,6 +156,13 @@ body{background:#0F172A;color:#F3F4F6;font-family:system-ui,-apple-system,sans-s
 .pill.r{background:#B91C1C}
 .soon{color:#9CA3AF;text-align:center;padding:30px 10px;font-size:1rem}
 .loading{color:#6B7280;text-align:center;padding:40px}
+.offhdr{color:#6B7280;font-size:.78rem;font-weight:700;text-transform:uppercase;
+        letter-spacing:.05em;margin:6px 2px 8px}
+.offcard{display:flex;align-items:center;justify-content:space-between;
+         background:#161C27;border:1px solid #232F42;border-radius:12px;
+         padding:14px;margin-bottom:8px;text-decoration:none}
+.offname{color:#D1D5DB;font-weight:600;font-size:1.02rem}
+.offhint{color:#6B7280;font-size:.8rem}
 .nav{position:fixed;bottom:0;left:0;right:0;background:#111827;border-top:1px solid #1f2937;
      display:flex;padding:6px 0 calc(6px + env(safe-area-inset-bottom))}
 .nav a{flex:1;text-align:center;color:#6B7280;text-decoration:none;font-size:.72rem;padding:6px 0}
@@ -294,9 +301,10 @@ def _dashboard_data() -> dict:
     unit = db.get_setting("temp_unit", "C")
     incs = []
     for inc in db.get_incubators():
-        # Dashboard shows only incubators that are turned ON (temp_mode != "off").
-        if calc and calc.is_off(inc):
-            continue
+        # Off incubators are shown in a separate compact "Inactive" section so
+        # they can be found and turned on from the phone, without cluttering the
+        # active list. They're flagged with "off" for the renderer.
+        is_off = bool(calc and calc.is_off(inc))
         row    = db.get_latest_reading(inc["id"])
         temp_c = row["temperature_c"] if row else None
         hum    = row["humidity_pct"]  if row else None
@@ -329,6 +337,7 @@ def _dashboard_data() -> dict:
         incs.append({
             "id":           inc["id"],
             "name":         inc["name"],
+            "off":          is_off,
             "temp":         temp_str,
             "temp_color":   temp_col,
             "humidity":     f"{hum:.0f}%" if hum is not None else "—",
@@ -368,23 +377,44 @@ def _dashboard_card_html(i: dict) -> str:
     )
 
 
+def _dashboard_offcard_html(i: dict) -> str:
+    """Compact, dimmed row for an incubator that is turned off."""
+    iid = i["id"]
+    return (
+        f'<a class="offcard" href="/m/incubator/{iid}">'
+        f'<span class="offname">{i["name"]}</span>'
+        '<span class="offhint">Off · tap to turn on ›</span>'
+        '</a>'
+    )
+
+
 def _dashboard_body() -> str:
     """Server-rendered dashboard (one round trip), then JS refreshes in place."""
-    data  = _dashboard_data()
-    cards = "".join(_dashboard_card_html(i) for i in data["incubators"]) \
-            or '<div class="loading">No incubators.</div>'
+    data   = _dashboard_data()
+    active = [i for i in data["incubators"] if not i.get("off")]
+    off    = [i for i in data["incubators"] if i.get("off")]
+    cards  = "".join(_dashboard_card_html(i) for i in active) \
+             or '<div class="loading">No active incubators.</div>'
+    offsec = ""
+    if off:
+        offsec = ('<div class="offhdr">Inactive</div>'
+                  + "".join(_dashboard_offcard_html(i) for i in off))
     return (
         '<div class="topbar"><h1>🐝 Incubators</h1><span class="upd" id="upd"></span></div>'
-        f'<div class="wrap"><div id="cards">{cards}</div></div>'
+        f'<div class="wrap"><div id="cards">{cards}</div>'
+        f'<div id="offsec">{offsec}</div></div>'
         '<script>'
         'async function load(){'
         ' try{'
         '  const r = await fetch("/api/dashboard", {cache:"no-store"});'
         '  const d = await r.json();'
+        '  const all = d.incubators || [];'
+        '  const active = all.filter(function(i){return !i.off;});'
+        '  const off = all.filter(function(i){return i.off;});'
         '  const c = document.getElementById("cards");'
-        '  if(!d.incubators.length){ c.innerHTML = "<div class=\\"loading\\">No incubators.</div>"; return; }'
         '  c.innerHTML = "";'
-        '  d.incubators.forEach(function(i){'
+        '  if(!active.length){ c.innerHTML = "<div class=\\"loading\\">No active incubators.</div>"; }'
+        '  active.forEach(function(i){'
         '    const card = document.createElement("div"); card.className = "card";'
         '    card.innerHTML ='
         '      "<a href=\\"/m/incubator/"+i.id+"\\" style=\\"text-decoration:none;color:inherit;display:block\\">"+'
@@ -401,6 +431,15 @@ def _dashboard_body() -> str:
         '      "</div>";'
         '    c.appendChild(card);'
         '  });'
+        '  const os = document.getElementById("offsec"); os.innerHTML = "";'
+        '  if(off.length){'
+        '    const h = document.createElement("div"); h.className = "offhdr"; h.textContent = "Inactive"; os.appendChild(h);'
+        '    off.forEach(function(i){'
+        '      const a = document.createElement("a"); a.className = "offcard"; a.href = "/m/incubator/"+i.id;'
+        '      a.innerHTML = "<span class=\\"offname\\">"+i.name+"</span><span class=\\"offhint\\">Off \\u00B7 tap to turn on \\u203A</span>";'
+        '      os.appendChild(a);'
+        '    });'
+        '  }'
         '  document.getElementById("upd").textContent = "Updated " + new Date().toLocaleTimeString();'
         ' }catch(e){}'
         '}'
