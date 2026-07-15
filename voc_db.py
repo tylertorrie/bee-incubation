@@ -465,6 +465,19 @@ def delete_device(device_id: int):
         conn.execute("DELETE FROM voc_devices WHERE id=?", (device_id,))
 
 
+def latest_valid_reading(incubator_id: int, max_ppm: float = 10.0) -> dict | None:
+    """Most recent reading for an incubator that is within the sensor's plausible
+    range (corrupt/misaligned frames read a constant ~34.304 ppm). Used by the
+    sensor-health check to tell 'no valid data' from a working baseline of 0."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """SELECT * FROM voc_readings
+               WHERE incubator_id=? AND voc_ppm IS NOT NULL AND voc_ppm<=?
+               ORDER BY timestamp DESC LIMIT 1""",
+            (incubator_id, max_ppm)).fetchone()
+        return dict(row) if row else None
+
+
 # ── Wi-Fi networks (provisioned to every sensor) ──────────────────────────────
 
 def get_wifi_networks() -> list:

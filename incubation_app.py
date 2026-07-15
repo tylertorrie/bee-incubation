@@ -66,7 +66,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.44.3"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.45.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -5513,15 +5513,88 @@ class IncubationApp(ctk.CTk):
 
     def _start_alert_checker(self):
         def loop():
+            cycle = 0
             while True:
                 try:
-                    self._check_date_alerts()
+                    self._check_sensor_health()        # every ~10 min
+                    if cycle % 6 == 0:
+                        self._check_date_alerts()      # hourly
                 except Exception as exc:
                     print(f"[AlertChecker] {exc}")
-                time.sleep(3600)  # check hourly
+                cycle += 1
+                time.sleep(600)  # 10 minutes
 
         t = threading.Thread(target=loop, daemon=True, name="AlertChecker")
         t.start()
+
+    @staticmethod
+    def _age_minutes(ts: str, now: datetime = None) -> float | None:
+        """Minutes since an ISO timestamp, tolerant of naive (local) and
+        tz-aware (UTC, from the Pi) timestamps. None if unparseable/absent."""
+        if not ts:
+            return None
+        try:
+            then = datetime.fromisoformat(ts)
+            ref  = datetime.now(then.tzinfo) if then.tzinfo else (now or datetime.now())
+            return (ref - then).total_seconds() / 60
+        except Exception:
+            return None
+
+    @staticmethod
+    def _fmt_age(minutes: float | None) -> str:
+        if minutes is None:
+            return "never"
+        if minutes < 60:
+            return f"{int(minutes)} min"
+        if minutes < 60 * 48:
+            return f"{int(minutes // 60)} hr"
+        return f"{int(minutes // (60 * 24))} days"
+
+    def _check_sensor_health(self):
+        """Raise/clear alerts when a Vapona sensor stops reporting or only sends
+        implausible (corrupt-frame) values. Runs on the alert-checker thread."""
+        try:
+            import voc_db
+        except Exception:
+            return
+        PI_OFFLINE_MIN = 30   # no contact at all (Pi down / off network)
+        DATA_STALE_MIN = 50   # Pi alive but no valid readings (~3 missed cycles)
+
+        incs = {i["id"]: i for i in db.get_incubators(include_hidden=True)}
+        for d in voc_db.get_devices():
+            # Separate dedup keys per failure mode so a transition (e.g. stale
+            # data -> fully offline) isn't suppressed by the other's cooldown.
+            off_dk  = f"vapona_offline:{d['id']}"
+            data_dk = f"vapona_stale:{d['id']}"
+            inc_id = d.get("incubator_id")
+            name = d.get("name") or d.get("hardware_id")
+            inc = incs.get(inc_id) if inc_id else None
+            # Unassigned, or its incubator is off -> no data expected; clear both.
+            if inc is None or (calc and calc.is_off(inc)):
+                db.auto_acknowledge_alerts([off_dk, data_dk])
+                continue
+
+            inc_name = inc.get("name", "")
+            seen_age = self._age_minutes(d.get("last_seen"))
+            last_ok  = voc_db.latest_valid_reading(inc_id)
+            data_age = self._age_minutes(last_ok.get("timestamp")) if last_ok else None
+
+            if seen_age is None or seen_age > PI_OFFLINE_MIN:
+                msg = (f"Vapona sensor “{name}” ({inc_name}) is offline — no contact "
+                       f"for {self._fmt_age(seen_age)}. Check the Pi's power and Wi-Fi.")
+                db.add_alert("vapona_sensor", msg, severity="warning",
+                             incubator_id=inc_id, dedup_key=off_dk, cooldown_min=180)
+                db.auto_acknowledge_alerts([data_dk])
+            elif data_age is None or data_age > DATA_STALE_MIN:
+                msg = (f"Vapona sensor “{name}” ({inc_name}) isn’t reporting valid "
+                       f"readings — last good reading {self._fmt_age(data_age)} ago. "
+                       f"The sensor may be disconnected, unpowered, or faulty "
+                       f"(check wiring/power).")
+                db.add_alert("vapona_sensor", msg, severity="warning",
+                             incubator_id=inc_id, dedup_key=data_dk, cooldown_min=180)
+                db.auto_acknowledge_alerts([off_dk])
+            else:
+                db.auto_acknowledge_alerts([off_dk, data_dk])
 
     def _check_date_alerts(self):
         lookahead = int(db.get_setting("date_alert_lookahead", "7"))
