@@ -265,8 +265,11 @@ def _mobile_poll_age(ts: Optional[str]) -> tuple:
     if not ts:
         return "Never polled", "#9CA3AF"
     try:
-        then    = datetime.fromisoformat(ts)
-        minutes = (datetime.now() - then).total_seconds() / 60
+        then = datetime.fromisoformat(ts)
+        # VOC timestamps are UTC-aware; temp readings are naive local. Compare
+        # in a consistent zone so aware/naive don't raise on subtraction.
+        now = datetime.now(then.tzinfo) if then.tzinfo else datetime.now()
+        minutes = (now - then).total_seconds() / 60
     except Exception:
         return "Unknown", "#9CA3AF"
     if minutes < 1:
@@ -544,6 +547,126 @@ def _svg_chart(readings: list, unit: str, t_min, t_max,
     )
 
 
+# The ZI02 PID sensor maxes out around 10 ppm. Anything above is a corrupt/
+# misaligned frame (e.g. the 0x86 command byte landing in the ppm slot yields a
+# constant 34.304), so we ignore it for display and reject it at ingest.
+VOC_MAX_PLAUSIBLE_PPM = 10.0
+
+
+def _voc_thresholds():
+    """(high_warn, high_alert) ppm for the Vapona preset, with fallbacks."""
+    try:
+        import voc_db as _v
+        p = _v.get_preset_by_name("DDVP (Vapona)") or {}
+        return (float(p.get("high_warn_ppm") or 0.60),
+                float(p.get("high_alert_ppm") or 0.70))
+    except Exception:
+        return (0.60, 0.70)
+
+
+def _svg_voc_chart(readings: list, hw: float = 0.60, ha: float = 0.70) -> str:
+    """Inline SVG Vapona (VOC ppm) trend with high-side threshold bands."""
+    from datetime import datetime
+    W, H = 360, 150
+    padL, padR, padT, padB = 6, 6, 10, 4
+    plotW, plotH = W - padL - padR, H - padT - padB
+
+    pts = []
+    for r in readings:
+        try:
+            t = datetime.fromisoformat(r["timestamp"])
+        except Exception:
+            continue
+        v = r.get("voc_ppm")
+        if v is not None and v <= VOC_MAX_PLAUSIBLE_PPM:
+            pts.append((t, v))
+
+    if len(pts) < 2:
+        return ('<div class="meta" style="text-align:center;padding:24px">'
+                'No Vapona readings in this range yet.</div>')
+
+    t0, t1 = pts[0][0].timestamp(), pts[-1][0].timestamp()
+    span = (t1 - t0) or 1
+    vmax = max(v for _, v in pts)
+    ymax = max(vmax * 1.15, ha * 1.25, 0.20)
+
+    def X(t): return padL + (t.timestamp() - t0) / span * plotW
+    def Y(v): return padT + plotH - (v / ymax) * plotH
+
+    def band(lo, hi, color):
+        y1, y2 = Y(hi), Y(lo)
+        return (f'<rect x="{padL}" y="{y1:.1f}" width="{plotW}" '
+                f'height="{max(0, y2 - y1):.1f}" fill="{color}" opacity="0.12"/>')
+
+    bands = band(0, hw, "#10B981") + band(hw, ha, "#F59E0B") + band(ha, ymax, "#EF4444")
+    line = " ".join(f"{X(t):.1f},{Y(v):.1f}" for t, v in pts)
+    return (
+        f'<svg viewBox="0 0 {W} {H}" width="100%" preserveAspectRatio="none" '
+        f'style="background:#111827;border-radius:10px">'
+        + bands
+        + f'<line x1="{padL}" y1="{Y(hw):.1f}" x2="{padL+plotW}" y2="{Y(hw):.1f}" '
+          f'stroke="#F59E0B" stroke-width="1" stroke-dasharray="2,3"/>'
+        + f'<line x1="{padL}" y1="{Y(ha):.1f}" x2="{padL+plotW}" y2="{Y(ha):.1f}" '
+          f'stroke="#EF4444" stroke-width="1" stroke-dasharray="2,3"/>'
+        + f'<polyline points="{line}" fill="none" stroke="#FFD700" stroke-width="2"/>'
+        + f'<text x="{padL+2}" y="{padT+10}" fill="#9CA3AF" font-size="11">{ymax:.2f} ppm</text>'
+        + f'<text x="{padL+2}" y="{padT+plotH-2}" fill="#9CA3AF" font-size="11">0</text>'
+        + '</svg>'
+    )
+
+
+def _voc_card_html(inc_id: int, hours: int) -> str:
+    """Vapona card (current ppm + trend). Returns '' if this incubator has no
+    Vapona sensor assigned and no readings at all."""
+    try:
+        import voc_db as _v
+    except Exception:
+        return ""
+    try:
+        assigned = any(d.get("incubator_id") == inc_id for d in _v.get_devices())
+    except Exception:
+        assigned = False
+    readings = _v.get_recent_readings(inc_id, hours)
+
+    def _plausible(rows):
+        return [r for r in rows
+                if r.get("voc_ppm") is not None
+                and r["voc_ppm"] <= VOC_MAX_PLAUSIBLE_PPM]
+
+    # Latest valid reading — look wider than the window if needed
+    valid = _plausible(readings) or _plausible(_v.get_recent_readings(inc_id, 24 * 30))
+    latest = valid[-1] if valid else None
+    if not assigned and not readings and not latest:
+        return ""
+
+    hw, ha = _voc_thresholds()
+    cur_txt, cur_col = "—", "#F3F4F6"
+    cur_age = ""
+    if latest and latest.get("voc_ppm") is not None:
+        ppm = latest["voc_ppm"]
+        cur_txt = f"{ppm:.3f} ppm"
+        if ppm > ha:
+            cur_col = "#EF4444"
+        elif ppm > hw:
+            cur_col = "#F59E0B"
+        else:
+            cur_col = "#22C55E"
+        _txt, _ = _mobile_poll_age(latest.get("timestamp"))
+        cur_age = _txt
+    chart = _svg_voc_chart(readings, hw, ha)
+    return (
+        '<div class="card">'
+        '<div class="ml" style="margin-bottom:8px">Vapona (VOC)</div>'
+        '<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">'
+        f'<div class="mv" style="color:{cur_col}">{cur_txt}</div>'
+        f'<span class="meta">Warn {hw:.2f} · Alert {ha:.2f} ppm</span>'
+        '</div>'
+        f'<div id="vocchart">{chart}</div>'
+        f'<div class="meta" style="margin-top:6px">● Last reading: {cur_age or "—"}</div>'
+        '</div>'
+    )
+
+
 def _incubator_detail_body(inc_id: int, hours: int) -> str:
     try:
         import inspection_db as idb
@@ -590,11 +713,11 @@ def _incubator_detail_body(inc_id: int, hours: int) -> str:
 
     ranges = [("1H", 1), ("6H", 6), ("24H", 24), ("7D", 24 * 7), ("30D", 24 * 30)]
     rbtns = "".join(
-        f'<a href="/m/incubator/{inc_id}?h={h}" '
-        f'style="flex:1;text-align:center;padding:8px 4px;border-radius:8px;'
-        f'text-decoration:none;font-weight:700;font-size:.9rem;'
+        f'<button class="rbtn" data-h="{h}" onclick="setRange({h})" '
+        f'style="flex:1;text-align:center;padding:8px 4px;border:none;border-radius:8px;'
+        f'cursor:pointer;font-weight:700;font-size:.9rem;'
         f'background:{"#D97706" if h==hours else "#263347"};'
-        f'color:{"#111" if h==hours else "#9CA3AF"}">{lbl}</a>'
+        f'color:{"#111" if h==hours else "#9CA3AF"}">{lbl}</button>'
         for lbl, h in ranges)
 
     stats = db.get_tray_stats(incubator_id=inc_id, status=db.IN_INCUBATOR_STATUSES)
@@ -760,13 +883,14 @@ function sensiboFan(level) {{
         '</div>'
         + ac_card +
         '<div class="card">'
-        f'<div style="display:flex;gap:8px;margin-bottom:10px">{rbtns}</div>'
-        f'{chart}'
+        f'<div id="rangebar" style="display:flex;gap:8px;margin-bottom:10px">{rbtns}</div>'
+        f'<div id="tempchart">{chart}</div>'
         '<div style="display:flex;justify-content:space-between;margin-top:6px">'
         '<span class="meta" style="color:#FFD700">— Temp</span>'
         '<span class="meta" style="color:#60A5FA">- - Humidity</span>'
         '</div>'
         '</div>'
+        + _voc_card_html(inc_id, hours) +
         f'<a class="ibtn" href="/m/trays/{inc_id}">📦 {stats["count"]} trays ·'
         f' {stats["total_gals"]:.1f} gal ›</a>'
         f'<a class="ibtn" style="background:#15803D" href="/m/inspections/{inc_id}">'
@@ -775,6 +899,24 @@ function sensiboFan(level) {{
         '+ Record inspection</a>'
         '</div>'
         + mode_js
+        + f"""
+<script>
+function setRange(h) {{
+  var bar = document.getElementById('rangebar');
+  bar.querySelectorAll('.rbtn').forEach(function(b) {{
+    var on = (parseInt(b.dataset.h, 10) === h);
+    b.style.background = on ? '#D97706' : '#263347';
+    b.style.color = on ? '#111' : '#9CA3AF';
+  }});
+  fetch('/m/api/incubator/{inc_id}/charts?h=' + h, {{cache: 'no-store'}})
+    .then(function(r) {{ return r.json(); }})
+    .then(function(d) {{
+      if (d.temp) document.getElementById('tempchart').innerHTML = d.temp;
+      var vc = document.getElementById('vocchart');
+      if (vc && d.voc) vc.innerHTML = d.voc;
+    }}).catch(function(e) {{}});
+}}
+</script>"""
     )
 
 
@@ -1983,6 +2125,38 @@ def _make_flask_app():
                             _incubator_detail_body(inc_id, hours),
                             active="home")
 
+    @app.route("/m/api/incubator/<int:inc_id>/charts")
+    def mobile_incubator_charts(inc_id):
+        """Return just the temp + Vapona chart SVGs for a timeframe, so the phone
+        can swap them in place without reloading the whole detail page."""
+        try:
+            hours = int(request.args.get("h", 24))
+        except (TypeError, ValueError):
+            hours = 24
+        if hours not in (1, 6, 24, 24 * 7, 24 * 30):
+            hours = 24
+        try:
+            import incubation_calc as calc
+        except Exception:
+            calc = None
+        inc = next((i for i in db.get_incubators(include_hidden=True)
+                    if i["id"] == inc_id), None)
+        if not inc:
+            return jsonify({"error": "not found"}), 404
+        unit = db.get_setting("temp_unit", "C")
+        t_min, t_max = (calc.get_temp_range(inc) if calc else (None, None))
+        goal_t, goal_h = db.get_mode_goals(inc.get("temp_mode", "incubation"))
+        temp_svg = _svg_chart(db.get_readings_hours(inc_id, hours),
+                              unit, t_min, t_max, goal_t, goal_h)
+        voc_svg = None
+        try:
+            import voc_db as _v
+            hw, ha = _voc_thresholds()
+            voc_svg = _svg_voc_chart(_v.get_recent_readings(inc_id, hours), hw, ha)
+        except Exception:
+            voc_svg = None
+        return jsonify({"temp": temp_svg, "voc": voc_svg})
+
     @app.route("/m/api/incubator/<int:inc_id>/mode", methods=["POST"])
     def mobile_set_incubator_mode(inc_id):
         try:
@@ -2359,11 +2533,17 @@ def _make_flask_app():
         ddvp = _vdb.get_preset_by_name("DDVP (Vapona)")
 
         accepted = 0
+        skipped_bad = 0
         for it in items:
             try:
                 ppm = float(it.get("voc_ppm"))
             except (ValueError, TypeError):
                 continue  # skip malformed rows, keep the rest of the batch
+            # Reject implausible readings (> sensor max) from corrupt/misaligned
+            # frames so they never pollute the trend or fire false alerts.
+            if ppm < 0 or ppm > VOC_MAX_PLAUSIBLE_PPM:
+                skipped_bad += 1
+                continue
             temp = it.get("temp_c")
             try:
                 temp = float(temp) if temp is not None else None
