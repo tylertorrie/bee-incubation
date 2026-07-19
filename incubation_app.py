@@ -3385,6 +3385,31 @@ class IncubationApp(ctk.CTk):
         self._db_path_lbl = _label(path_row, db.DB_PATH, FONT_S, BLUE)
         self._db_path_lbl.pack(side="left", padx=(8, 0))
 
+        # Backups status row — daily auto-snapshots in a "Backups" subfolder
+        backup_row = ctk.CTkFrame(dsg, fg_color="transparent")
+        backup_row.pack(fill="x", padx=12, pady=(0, 4))
+        _label(backup_row, "Backups:", FONT_S, SUBTEXT).pack(side="left")
+
+        def _backup_status_text():
+            try:
+                bk = db.list_backups()
+                if not bk:
+                    return "none yet (created automatically at startup)"
+                newest = os.path.basename(bk[0]).replace("incubation-", "").replace(".db", "")
+                return f"{len(bk)} daily snapshot(s), newest {newest}"
+            except Exception:
+                return "—"
+
+        self._backup_lbl = _label(backup_row, _backup_status_text(), FONT_S, TEXT)
+        self._backup_lbl.pack(side="left", padx=(8, 0))
+
+        def _backup_now():
+            self._run_db_backup()
+            self._backup_lbl.configure(text=_backup_status_text())
+
+        _btn(backup_row, "Back up now", _backup_now,
+             fg=CARD2, hover=BORDER, width=110, height=24).pack(side="left", padx=12)
+
         # New path entry row
         new_row = ctk.CTkFrame(dsg, fg_color="transparent")
         new_row.pack(fill="x", padx=12, pady=(4, 10))
@@ -5519,6 +5544,9 @@ class IncubationApp(ctk.CTk):
                     self._check_sensor_health()        # every ~10 min
                     if cycle % 6 == 0:
                         self._check_date_alerts()      # hourly
+                        self._check_db_conflicts()     # hourly
+                    if cycle % 72 == 0:                # ~every 12 h (and at startup)
+                        self._run_db_backup()
                 except Exception as exc:
                     print(f"[AlertChecker] {exc}")
                 cycle += 1
@@ -5526,6 +5554,39 @@ class IncubationApp(ctk.CTk):
 
         t = threading.Thread(target=loop, daemon=True, name="AlertChecker")
         t.start()
+
+    def _run_db_backup(self):
+        """Create today's DB snapshot (idempotent) and prune old ones."""
+        try:
+            path = db.make_daily_backup(keep_days=30)
+            if path:
+                self._sync_log(f"[Backup] daily snapshot ok: {os.path.basename(path)}")
+            else:
+                self._sync_log("[Backup] snapshot failed")
+        except Exception as exc:
+            self._sync_log(f"[Backup] {exc}")
+
+    def _check_db_conflicts(self):
+        """Raise a loud alert when Google Drive creates DB conflict copies."""
+        try:
+            conflicts = db.find_drive_conflicts()
+        except Exception:
+            return
+        if not conflicts:
+            db.auto_acknowledge_alerts(["db_conflict"])
+            return
+        names = ", ".join(os.path.basename(c) for c in conflicts[:3])
+        more  = f" (+{len(conflicts) - 3} more)" if len(conflicts) > 3 else ""
+        db.add_alert(
+            "db_conflict",
+            f"Google Drive made {len(conflicts)} database conflict copy(ies): "
+            f"{names}{more}. Two computers likely wrote the database at the same "
+            f"time — open the Data Storage folder and reconcile; recent changes "
+            f"may have diverged.",
+            severity="critical",
+            cooldown_min=720,
+            dedup_key="db_conflict",
+        )
 
     @staticmethod
     def _age_minutes(ts: str, now: datetime = None) -> float | None:

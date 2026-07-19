@@ -319,6 +319,86 @@ def set_setting(key: str, value: str):
         )
 
 
+# ── Backups & Google Drive conflict detection ────────────────────────────────
+
+def get_backup_dir() -> str:
+    """Folder for daily DB snapshots — a 'Backups' subfolder next to the live DB."""
+    return os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "Backups")
+
+
+def make_daily_backup(keep_days: int = 30) -> str | None:
+    """Write today's consistent DB snapshot if it doesn't exist yet, then prune
+    snapshots older than `keep_days`.
+
+    Returns the backup path (existing or newly created), or None on failure.
+    Safe to call often — it no-ops once today's snapshot exists.
+    """
+    import glob
+    try:
+        bdir = get_backup_dir()
+        os.makedirs(bdir, exist_ok=True)
+        today = datetime.now().strftime("%Y-%m-%d")
+        dest  = os.path.join(bdir, f"incubation-{today}.db")
+        if not os.path.exists(dest):
+            # VACUUM INTO makes a clean, consistent copy even while the app holds
+            # the DB open (a raw file copy could catch a half-written page).
+            safe = dest.replace("'", "''")
+            conn = sqlite3.connect(DB_PATH)
+            try:
+                conn.isolation_level = None       # VACUUM can't run in a transaction
+                conn.execute(f"VACUUM INTO '{safe}'")
+            finally:
+                conn.close()
+        # Prune old snapshots (the date-stamped names sort chronologically).
+        snaps = sorted(glob.glob(os.path.join(bdir, "incubation-*.db")))
+        for old in (snaps[:-keep_days] if len(snaps) > keep_days else []):
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        return dest
+    except Exception:
+        return None
+
+
+def list_backups() -> list:
+    """Return existing daily backup file paths, newest first."""
+    import glob
+    try:
+        return sorted(glob.glob(os.path.join(get_backup_dir(), "incubation-*.db")),
+                      reverse=True)
+    except Exception:
+        return []
+
+
+def find_drive_conflicts() -> list:
+    """Detect Google Drive 'conflict copy' files next to the live database.
+
+    Drive for Desktop keeps both versions when two machines write the same file,
+    naming the loser things like 'incubation (1).db', 'incubation.db (2)', or
+    '…conflicted copy….db'. Any such file means two computers wrote the DB at
+    once and the data may have diverged.
+    """
+    try:
+        folder = os.path.dirname(os.path.abspath(DB_PATH))
+        live   = os.path.basename(DB_PATH)          # incubation.db
+        stem   = os.path.splitext(live)[0].lower()  # incubation
+        hits   = []
+        for name in os.listdir(folder):
+            if name == live:
+                continue
+            low = name.lower()
+            if not low.startswith(stem):
+                continue
+            is_db = low.endswith(".db") or ".db" in low
+            looks_conflict = ("conflict" in low) or (re.search(r"\(\d+\)", name) is not None)
+            if is_db and looks_conflict:
+                hits.append(os.path.join(folder, name))
+        return sorted(hits)
+    except Exception:
+        return []
+
+
 # ── Incubators ────────────────────────────────────────────────────────────────
 
 def set_incubator_incubation_start(incubator_id: int, start_iso: str):
