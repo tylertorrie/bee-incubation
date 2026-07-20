@@ -12,11 +12,24 @@ python incubation_app.py        # launches the GUI (main entry point)
 
 - Requires Python 3.12+ (3.14 also works). Install deps with
   `pip install -r requirements.txt`.
-- It's a GUI app — to verify a change, launch it and look at the window. There
-  is no automated test suite. On Windows, `pythonw.exe incubation_app.py` runs
-  it without a console window (that's what the desktop shortcut uses).
+- It's a GUI app — to verify a change, launch it and look at the window. On
+  Windows, `pythonw.exe incubation_app.py` runs it without a console window
+  (that's what the desktop shortcut uses).
 - `run_app.py` and `create_shortcut.py` are helper scripts (launcher / desktop
   shortcut + icon generation).
+
+## Tests
+
+Pure logic (`incubation_calc`, `incubation_db` helpers) is covered by pytest:
+
+```
+pip install -r requirements-dev.txt
+python -m pytest tests/ -q
+```
+
+DB tests run against a throwaway temp database (never the live Google Drive DB).
+The app's auto-sync runs this suite before it pushes and won't push if it fails,
+so keep the tests green. There is no automated coverage of the GUI itself.
 
 ## How the database is found (important)
 

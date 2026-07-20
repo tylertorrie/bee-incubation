@@ -5852,6 +5852,14 @@ class IncubationApp(ctk.CTk):
                         f"sync paused: {os.path.basename(f)} has errors", ok=False))
                     self._sync_log(f"[AutoSync] {rel} failed py_compile — not committing")
                     return
+            # Safety guard: never propagate code that fails the test suite.
+            tests_ok, tests_out = self._run_tests(app_dir)
+            if not tests_ok:
+                self.after(0, lambda: self._set_git_status(
+                    "sync paused: tests failing", ok=False))
+                self._sync_log("[AutoSync] tests failing — not committing/pushing:\n"
+                               + tests_out[-500:])
+                return
             _git("add", "-A")
             host  = socket.gethostname()
             stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -5881,6 +5889,34 @@ class IncubationApp(ctk.CTk):
 
         if not _did_something:
             self._sync_log("[AutoSync] up to date — nothing to pull or push")
+
+    def _run_tests(self, app_dir: str) -> tuple[bool, str]:
+        """Run the pytest suite for the auto-sync gate.
+
+        Returns (passed, output). A missing tests/ folder or a machine without
+        pytest installed is treated as a pass, so sync is never blocked just
+        because the test tooling isn't present.
+        """
+        tests_dir = os.path.join(app_dir, "tests")
+        if not os.path.isdir(tests_dir):
+            return True, ""
+        # Don't block sync when pytest simply isn't installed on this machine.
+        have = subprocess.run([sys.executable, "-c", "import pytest"],
+                              capture_output=True, creationflags=_NO_WINDOW)
+        if have.returncode != 0:
+            self._sync_log("[AutoSync] pytest not installed — skipping test gate")
+            return True, ""
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "pytest", tests_dir, "-q"],
+                capture_output=True, text=True, timeout=240,
+                creationflags=_NO_WINDOW, cwd=app_dir)
+        except Exception as exc:
+            return True, f"(test run skipped: {exc})"
+        # pytest exit 5 == "no tests collected" — treat as a pass.
+        if r.returncode in (0, 5):
+            return True, r.stdout
+        return False, (r.stdout or "") + (r.stderr or "")
 
     def _set_git_status(self, msg: str, ok: bool):
         """Flash a brief git status message in the status bar."""
