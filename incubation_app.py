@@ -66,7 +66,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.47.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.47.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -2583,6 +2583,7 @@ class IncubationApp(ctk.CTk):
         self._tray_sort_asc = True
         self._tray_page = 0
         self._tray_sel = set()
+        self._tray_anchor = None
         self._tray_all = []
         self._tray_row_frames = {}
         return frame
@@ -2652,6 +2653,27 @@ class IncubationApp(ctk.CTk):
         self._tray_sel_lbl.configure(
             text=f"{n} selected  (of {shown} shown)" if n else "")
 
+    def _tray_click(self, event, tid: int):
+        """Row click. Plain click toggles one row and sets the range anchor;
+        Shift+click selects the whole range between the anchor and this row (in
+        the current sorted order, across pages)."""
+        shift = bool(event.state & 0x0001)  # Shift key mask
+        anchor = getattr(self, "_tray_anchor", None)
+        ids = [r["id"] for r in self._tray_all]
+        if shift and anchor in ids and tid in ids:
+            i0, i1 = ids.index(anchor), ids.index(tid)
+            lo, hi = (i0, i1) if i0 <= i1 else (i1, i0)
+            for rid in ids[lo:hi + 1]:
+                self._tray_sel.add(rid)
+            for rid, rf in self._tray_row_frames.items():
+                if rf.winfo_exists():
+                    rf.configure(fg_color="#26374F" if rid in self._tray_sel
+                                 else rf._base_bg)
+            self._update_tray_sel_lbl()
+        else:
+            self._tray_toggle_sel(tid)
+            self._tray_anchor = tid
+
     def _tray_select_all(self):
         """Select every tray in the current filtered view (all pages)."""
         for row in self._tray_all:
@@ -2665,6 +2687,7 @@ class IncubationApp(ctk.CTk):
     def _tray_clear_sel(self):
         """Clear the current selection."""
         self._tray_sel.clear()
+        self._tray_anchor = None
         for tid, rf in self._tray_row_frames.items():
             if rf.winfo_exists():
                 rf.configure(fg_color=rf._base_bg)
@@ -2721,10 +2744,10 @@ class IncubationApp(ctk.CTk):
                     _label(rf, str(v), ("Segoe UI", 11), col,
                            anchor="w" if al == "w" else "e"
                            ).grid(row=0, column=ci, sticky="ew", padx=8, pady=5)
-            rf.bind("<Button-1>", lambda e, t=row["id"]: self._tray_toggle_sel(t))
+            rf.bind("<Button-1>", lambda e, t=row["id"]: self._tray_click(e, t))
             rf.bind("<Double-1>", lambda e, t=row["id"]: self._open_tray_by_id(t))
             for ch in rf.winfo_children():
-                ch.bind("<Button-1>", lambda e, t=row["id"]: self._tray_toggle_sel(t))
+                ch.bind("<Button-1>", lambda e, t=row["id"]: self._tray_click(e, t))
                 ch.bind("<Double-1>", lambda e, t=row["id"]: self._open_tray_by_id(t))
 
         self._tray_page_lbl.configure(text=f"Page {self._tray_page + 1} of {pages}  ·  {total} trays")
@@ -2766,6 +2789,7 @@ class IncubationApp(ctk.CTk):
                          _parse_date_loose(t.get("in_date")))]
 
         self._tray_sel = set()
+        self._tray_anchor = None
         self._tray_all = [{
             "id": t["id"], "status": t.get("status") or "active",
             "cells": [
