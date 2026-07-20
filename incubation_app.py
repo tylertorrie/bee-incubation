@@ -3343,6 +3343,17 @@ class IncubationApp(ctk.CTk):
             _he.insert(0, "" if _gh is None else f"{_gh:g}")
             self._goal_entries[_mk] = (_te, _he)
 
+        # Development model (degree-days) — drives the projection on the detail view
+        dm = section("Development Model (degree-days)")
+        _label(dm,
+               "Optional. Projects a batch's progress from accumulated temperature.\n"
+               "Base = developmental threshold; Target = °C-days to emergence\n"
+               "(calibrate the target from your own records). Leave target blank to hide.",
+               FONT_S, SUBTEXT).grid(row=0, column=0, columnspan=2,
+                                     sticky="w", padx=4, pady=(0, 6))
+        self._set["dev_base_temp_c"] = _FormRow(dm, 1, "Base temp (°C)", "10", 100)
+        self._set["dev_target_degree_days"] = _FormRow(dm, 2, "Target (°C-days)", "", 100)
+
         # Calculation
         cf = section("Weight Calculations")
         self._set["lbs_per_gal"] = _FormRow(cf, 0, "Lbs per Gallon (raw cells)", "2.2", 100)
@@ -3482,7 +3493,8 @@ class IncubationApp(ctk.CTk):
                 "qr_server_port", "qr_server_enabled", "mobile_passcode",
                 "smtp_host", "smtp_port", "smtp_tls",
                 "smtp_username", "smtp_password", "smtp_from",
-                "gcal_credentials_path", "gcal_calendar_id", "gcal_enabled"]
+                "gcal_credentials_path", "gcal_calendar_id", "gcal_enabled",
+                "dev_base_temp_c", "dev_target_degree_days"]
         for k in keys:
             if k in self._set:
                 self._set[k].set(db.get_setting(k))
@@ -3505,7 +3517,8 @@ class IncubationApp(ctk.CTk):
                 "qr_server_port", "qr_server_enabled", "mobile_passcode",
                 "smtp_host", "smtp_port", "smtp_tls",
                 "smtp_username", "smtp_password", "smtp_from",
-                "gcal_credentials_path", "gcal_calendar_id", "gcal_enabled"]
+                "gcal_credentials_path", "gcal_calendar_id", "gcal_enabled",
+                "dev_base_temp_c", "dev_target_degree_days"]
         for k in keys:
             if k in self._set:
                 db.set_setting(k, self._set[k].get())
@@ -4186,12 +4199,17 @@ class IncubationApp(ctk.CTk):
 
         # Canvas holder — we replace its contents when the range changes
         chart_canvas_frame = ctk.CTkFrame(chart_frame, fg_color="transparent")
-        chart_canvas_frame.pack(fill="x", padx=8, pady=(0, 10))
+        chart_canvas_frame.pack(fill="x", padx=8, pady=(0, 4))
+
+        # Analytics line for the selected range: avg temp / % time in range / degree-hours
+        chart_stats = _label(chart_frame, "", FONT_S, SUBTEXT)
+        chart_stats.pack(anchor="w", padx=14, pady=(0, 8))
 
         def _draw_chart(hours: float, label: str):
             for w in chart_canvas_frame.winfo_children():
                 w.destroy()
             chart_title.configure(text=f"Last {label}")
+            chart_stats.configure(text="")
 
             # Highlight active button (spec: active gold, others #202B3D)
             for lbl, btn in _range_btns.items():
@@ -4210,6 +4228,18 @@ class IncubationApp(ctk.CTk):
                        f"No readings in the last {label}.",
                        FONT_S, SUBTEXT).pack(pady=16)
                 return
+
+            # Analytics summary for this range
+            _tmn, _tmx = calc.get_temp_range(fresh)
+            _sm = calc.summarize_readings(readings, _tmn, _tmx)
+            _bits = []
+            if _sm["avg_temp"] is not None:
+                _bits.append(f"Avg {calc.format_temp(_sm['avg_temp'], unit)}")
+            if _sm["in_range_pct"] is not None:
+                _bits.append(f"In range {_sm['in_range_pct']}%")
+            if _sm["degree_hours"]:
+                _bits.append(f"{_sm['degree_hours']:.0f} °C·h")
+            chart_stats.configure(text="    ·    ".join(_bits))
 
             try:
                 # Build series, breaking the line (NaN) across gaps in the data
@@ -4311,6 +4341,32 @@ class IncubationApp(ctk.CTk):
 
         # Defer chart so the screen appears instantly, then render after
         frame.after(50, lambda: _draw_chart(24, "24H"))
+
+        # ── Development projection (degree-days) — only when a target is set ───
+        _target_dd = db.get_setting("dev_target_degree_days", "")
+        _act_batch = next(iter(db.get_batches(incubator_id=fresh["id"],
+                                              status="active")), None)
+        if _target_dd and _act_batch and _act_batch.get("start_date"):
+            try:
+                _base    = float(db.get_setting("dev_base_temp_c", "10") or 10)
+                _tgt     = float(_target_dd)
+                _elapsed = calc.get_incubation_day(_act_batch) or 1
+                _rd      = db.get_readings_hours(fresh["id"], int(_elapsed * 24) + 24)
+                _dd      = calc.accumulate_degree_days(_rd, base_c=_base)
+                _pct, _days_left = calc.project_completion(_dd, _tgt, _elapsed)
+                _txt = f"Development: {_dd:.0f} / {_tgt:.0f} °C-days  ({_pct}%)"
+                if _days_left is not None:
+                    _txt += f"   ·   ~{_days_left:.0f} day(s) to target"
+                _dev_card = ctk.CTkFrame(body, fg_color=CARD, corner_radius=10)
+                _dev_card.pack(fill="x", padx=16, pady=(0, 8))
+                _label(_dev_card, "🐝  " + _txt, FONT_B, GOLD).pack(
+                    anchor="w", padx=14, pady=10)
+                _label(_dev_card,
+                       f"Above {_base:g}°C base · day {_elapsed} · projection from "
+                       f"average accumulation rate (calibrate the target in Settings).",
+                       FONT_S, SUBTEXT).pack(anchor="w", padx=14, pady=(0, 10))
+            except Exception:
+                pass
 
         # ── Tabs: Inspections / Batches / Trays / VOC ─────────────────────────
         # Tabs are built lazily — content is only created the first time each tab is selected.

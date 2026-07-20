@@ -210,6 +210,106 @@ def check_temp_humidity(incubator: dict,
     return problems
 
 
+# ── Analytics ─────────────────────────────────────────────────────────────────
+
+def summarize_readings(readings, t_min=None, t_max=None, max_gap_h: float = 1.0) -> dict:
+    """Summarise a list of temp/humidity readings for one incubator.
+
+    `readings`: dicts with 'timestamp' (ISO), 'temperature_c', 'humidity_pct'.
+    Returns averages/extremes, degree-hours (trapezoidal integral of temperature
+    over time, °C·h), and — when a [t_min, t_max] band is given — the % of time
+    the temperature stayed in range. Gaps longer than `max_gap_h` hours (sensor
+    outages) are not counted toward time totals so they don't skew the result.
+    """
+    pts = []
+    for r in readings:
+        try:
+            ts = datetime.fromisoformat(r["timestamp"])
+        except Exception:
+            continue
+        pts.append((ts, r.get("temperature_c"), r.get("humidity_pct")))
+    pts.sort(key=lambda p: p[0])
+
+    temps = [t for _, t, _ in pts if t is not None]
+    hums  = [h for _, _, h in pts if h is not None]
+    out = {
+        "count":         len(pts),
+        "avg_temp":      round(sum(temps) / len(temps), 1) if temps else None,
+        "min_temp":      round(min(temps), 1) if temps else None,
+        "max_temp":      round(max(temps), 1) if temps else None,
+        "avg_humidity":  round(sum(hums) / len(hums)) if hums else None,
+        "degree_hours":  0.0,
+        "hours_total":   0.0,
+        "hours_in_range": 0.0,
+        "in_range_pct":  None,
+    }
+    for (t1, tmp1, _), (t2, tmp2, _) in zip(pts, pts[1:]):
+        dh = (t2 - t1).total_seconds() / 3600.0
+        if dh <= 0 or dh > max_gap_h or tmp1 is None or tmp2 is None:
+            continue
+        avg_t = (tmp1 + tmp2) / 2.0
+        out["hours_total"]  += dh
+        out["degree_hours"] += avg_t * dh
+        if t_min is not None and t_max is not None and t_min <= avg_t <= t_max:
+            out["hours_in_range"] += dh
+    out["degree_hours"] = round(out["degree_hours"], 1)
+    out["hours_total"]  = round(out["hours_total"], 1)
+    out["hours_in_range"] = round(out["hours_in_range"], 1)
+    if out["hours_total"] > 0 and t_min is not None:
+        out["in_range_pct"] = round(out["hours_in_range"] / out["hours_total"] * 100)
+    return out
+
+
+def accumulate_degree_days(readings, base_c: float = 10.0,
+                           max_gap_h: float = 1.0) -> float:
+    """Accumulated degree-days above `base_c` from time-series readings.
+
+    Degree-days = integral of max(0, temp − base) over time, expressed in days.
+    A standard, transparent way to relate temperature exposure to insect
+    development. `base_c` (developmental threshold) is configurable per operation
+    — this function makes no species assumption.
+    """
+    pts = []
+    for r in readings:
+        try:
+            ts = datetime.fromisoformat(r["timestamp"])
+        except Exception:
+            continue
+        t = r.get("temperature_c")
+        if t is not None:
+            pts.append((ts, t))
+    pts.sort(key=lambda p: p[0])
+
+    dd = 0.0
+    for (t1, tmp1), (t2, tmp2) in zip(pts, pts[1:]):
+        dh = (t2 - t1).total_seconds() / 3600.0
+        if dh <= 0 or dh > max_gap_h:
+            continue
+        avg_above = max(0.0, (tmp1 + tmp2) / 2.0 - base_c)
+        dd += avg_above * (dh / 24.0)
+    return round(dd, 2)
+
+
+def project_completion(accumulated_dd: float, target_dd: float,
+                       elapsed_days: float):
+    """Project progress toward a degree-day target.
+
+    Returns (pct_complete, projected_days_remaining). days_remaining is None when
+    it can't be estimated yet (no elapsed time / no accumulation / no target).
+    The projection extrapolates the average accumulation rate so far.
+    """
+    if not target_dd or target_dd <= 0:
+        return None, None
+    pct = round(accumulated_dd / target_dd * 100)
+    if elapsed_days <= 0 or accumulated_dd <= 0:
+        return pct, None
+    rate = accumulated_dd / elapsed_days            # degree-days per day
+    if rate <= 0:
+        return pct, None
+    remaining = max(0.0, target_dd - accumulated_dd)
+    return pct, round(remaining / rate, 1)
+
+
 # ── Unit conversion ───────────────────────────────────────────────────────────
 
 def c_to_f(c: float) -> float:
