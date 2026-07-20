@@ -1015,6 +1015,57 @@ def set_trays_status(tray_ids: list, status: str, out_date: str = None,
         return conn.total_changes
 
 
+def move_trays(tray_ids: list, dest_incubator_id: int, cool_date: str = None) -> int:
+    """Reassign trays to another incubator, applying cool-day carry-over rules.
+
+    For each tray, its current incubator's temp_mode is compared to the
+    destination incubator's temp_mode:
+      - destination is OFF       -> freeze: keep status and cool_date as-is
+      - SAME temp_mode as source -> carry over: keep status and cool_date, so
+        cool-days continue when moving between two incubators in the same mode
+      - DIFFERENT temp_mode      -> the tray adopts the destination's state:
+          incubation           -> status 'active', cool_date cleared
+          holding/cool_storage  -> status 'cooled', cool_date reset to today
+    Released/removed trays are only reassigned (status left untouched) so they
+    aren't accidentally brought back into incubation. Returns the number moved.
+    """
+    if not tray_ids:
+        return 0
+    from datetime import date as _date
+    today = cool_date or _date.today().isoformat()
+    with get_conn() as conn:
+        drow = conn.execute("SELECT temp_mode FROM incubators WHERE id=?",
+                            (dest_incubator_id,)).fetchone()
+        if drow is None:
+            return 0
+        dst_mode = drow["temp_mode"] or "incubation"
+        moved = 0
+        for tid in tray_ids:
+            row = conn.execute(
+                "SELECT t.status AS tstatus, i.temp_mode AS src_mode "
+                "FROM trays t LEFT JOIN incubators i ON t.incubator_id = i.id "
+                "WHERE t.id=?", (tid,)).fetchone()
+            if row is None:
+                continue
+            src_mode = row["src_mode"]
+            if (row["tstatus"] in ("released", "removed")
+                    or dst_mode == "off"
+                    or (src_mode is not None and src_mode == dst_mode)):
+                # Freeze / carry over: only change the incubator assignment
+                conn.execute("UPDATE trays SET incubator_id=? WHERE id=?",
+                             (dest_incubator_id, tid))
+            elif dst_mode == "incubation":
+                conn.execute(
+                    "UPDATE trays SET incubator_id=?, status='active', "
+                    "cool_date=NULL WHERE id=?", (dest_incubator_id, tid))
+            else:  # holding / cool_storage -> cooled, cool-down starts today
+                conn.execute(
+                    "UPDATE trays SET incubator_id=?, status='cooled', "
+                    "cool_date=? WHERE id=?", (dest_incubator_id, today, tid))
+            moved += 1
+        return moved
+
+
 def delete_all_trays() -> int:
     """Delete every tray row. Returns the number of rows removed.
     Destructive — callers must confirm with the user first."""

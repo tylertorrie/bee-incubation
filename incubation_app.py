@@ -66,7 +66,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.45.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.46.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -2493,6 +2493,16 @@ class IncubationApp(ctk.CTk):
         self._bulk_status = _combo(hdr, [lbl for _v, lbl in db.TRAY_STATUS_OPTIONS], 120)
         self._bulk_status.set("Released")
         self._bulk_status.pack(side="right", padx=6)
+        # Bulk-move selected trays to another incubator (cool-days carry over
+        # only when source and destination are in the same temp mode).
+        _btn_secondary(hdr, "Move →", self._bulk_move_trays,
+                       width=80).pack(side="right", padx=(8, 0))
+        _move_incs = db.get_incubators()
+        self._bulk_move_map = {i["name"]: i["id"] for i in _move_incs}
+        self._bulk_move_dest = _combo(hdr, list(self._bulk_move_map.keys()), 140)
+        if _move_incs:
+            self._bulk_move_dest.set(_move_incs[0]["name"])
+        self._bulk_move_dest.pack(side="right", padx=6)
         _btn_secondary(hdr, "QR Code", self._show_selected_qr,
                        width=90).pack(side="right", padx=6)
         _btn_secondary(hdr, "History", self._show_tray_history,
@@ -5069,6 +5079,42 @@ class IncubationApp(ctk.CTk):
         messagebox.showinfo("Status Updated",
             f"Updated {len(tray_ids)} tray(s) to '{db.tray_status_label(new_status)}'"
             + (f" with out date {out_date}." if out_date else "."), parent=self)
+
+    def _bulk_move_trays(self):
+        """Reassign all selected trays to another incubator, applying the
+        cool-day carry-over rules (same mode carries over, different mode adopts
+        the destination's status, Off freezes)."""
+        if not self._tray_sel:
+            messagebox.showinfo("Move Trays",
+                "Click one or more trays to select them first.", parent=self)
+            return
+        dest_name = self._bulk_move_dest.get()
+        dest_id   = self._bulk_move_map.get(dest_name)
+        if not dest_id:
+            messagebox.showinfo("Move Trays",
+                "Pick a destination incubator first.", parent=self)
+            return
+        tray_ids = [int(t) for t in self._tray_sel]
+        dest = next((i for i in db.get_incubators(include_hidden=True)
+                     if i["id"] == dest_id), None)
+        dest_mode  = (dest.get("temp_mode") if dest else "") or "incubation"
+        mode_label = calc.TEMP_MODES.get(dest_mode, {}).get("label", dest_mode)
+        if not messagebox.askyesno(
+            "Move Trays",
+            f"Move {len(tray_ids)} selected tray(s) to {dest_name} "
+            f"({mode_label})?\n\n"
+            "• Trays from an incubator in the SAME mode keep their cool-day count.\n"
+            "• Trays from a different mode take on this incubator's status "
+            "(cool-days start fresh or clear).\n"
+            "• If this incubator is Off, trays keep their current status.",
+            parent=self):
+            return
+        moved = db.move_trays(tray_ids, dest_id)
+        self._tray_sel.clear()
+        self._refresh_trays()
+        self._refresh_alert_badge()
+        messagebox.showinfo("Trays Moved",
+            f"Moved {moved} tray(s) to {dest_name}.", parent=self)
 
     def _delete_all_trays(self):
         """Delete every tray, behind a two-step confirmation."""
