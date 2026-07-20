@@ -66,7 +66,7 @@ except ImportError:
     HAS_MPL = False
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.46.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.47.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:
@@ -2572,6 +2572,10 @@ class IncubationApp(ctk.CTk):
         self._tray_page_lbl.pack(side="left", padx=10)
         self._tray_next_btn = _btn_secondary(pg, "Next ›", self._tray_next_page, width=80)
         self._tray_next_btn.pack(side="left")
+        _btn_secondary(pg, "☑ Select All", self._tray_select_all,
+                       width=110).pack(side="left", padx=(14, 0))
+        _btn_secondary(pg, "Clear", self._tray_clear_sel,
+                       width=70).pack(side="left", padx=6)
         self._tray_sel_lbl = _label(pg, "", FONT_S, TEAL)
         self._tray_sel_lbl.pack(side="right")
 
@@ -2640,8 +2644,31 @@ class IncubationApp(ctk.CTk):
         rf = self._tray_row_frames.get(tid)
         if rf and rf.winfo_exists():
             rf.configure(fg_color="#26374F" if tid in self._tray_sel else rf._base_bg)
+        self._update_tray_sel_lbl()
+
+    def _update_tray_sel_lbl(self):
+        n = len(self._tray_sel)
+        shown = len(getattr(self, "_tray_all", []))
         self._tray_sel_lbl.configure(
-            text=f"{len(self._tray_sel)} selected" if self._tray_sel else "")
+            text=f"{n} selected  (of {shown} shown)" if n else "")
+
+    def _tray_select_all(self):
+        """Select every tray in the current filtered view (all pages)."""
+        for row in self._tray_all:
+            self._tray_sel.add(row["id"])
+        # Re-color the rows visible on the current page
+        for tid, rf in self._tray_row_frames.items():
+            if rf.winfo_exists():
+                rf.configure(fg_color="#26374F")
+        self._update_tray_sel_lbl()
+
+    def _tray_clear_sel(self):
+        """Clear the current selection."""
+        self._tray_sel.clear()
+        for tid, rf in self._tray_row_frames.items():
+            if rf.winfo_exists():
+                rf.configure(fg_color=rf._base_bg)
+        self._update_tray_sel_lbl()
 
     def _tray_render_page(self):
         import math as _m
