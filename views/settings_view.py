@@ -34,8 +34,7 @@ from ui_theme import (
 )
 from views.dialogs import _VocDeviceManager, _WifiNetworkManager
 
-# Windows: run helper subprocesses hidden (same flag the main module uses).
-_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+from app_config import _NO_WINDOW
 
 
 class SettingsViewMixin:
