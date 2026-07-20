@@ -324,3 +324,39 @@ def format_temp(temp_c: float, unit: str = "C") -> str:
     if unit == "F":
         return f"{c_to_f(temp_c):.1f}°F"
     return f"{temp_c:.1f}°C"
+
+
+# ── Tray date helpers (moved from incubation_app.py) ─────────────────────────
+
+def _parse_date_loose(s):
+    """Parse a date string in common formats (ISO or M/D/Y). Returns date or None."""
+    if not s:
+        return None
+    s = str(s).strip()
+    token = s.replace("T", " ").split()[0] if s else s   # the date portion
+    for cand in (token, s):
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+            try:
+                return datetime.strptime(cand, fmt).date()
+            except ValueError:
+                continue
+    try:
+        return datetime.fromisoformat(s).date()
+    except Exception:
+        return None
+
+
+def cool_down_days(tray: dict):
+    """Days a tray has been / was cooled. None if not applicable."""
+    cd = _parse_date_loose(tray.get("cool_date"))
+    if not cd:
+        return None
+    status = tray.get("status")
+    if status == "cooled":
+        end = datetime.now().date()
+    elif status == "released":
+        end = _parse_date_loose(tray.get("out_date")) or datetime.now().date()
+    else:
+        return None
+    return max((end - cd).days, 0)
+

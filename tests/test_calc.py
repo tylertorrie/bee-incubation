@@ -97,6 +97,30 @@ def test_check_temp_humidity():
 
 # ── Unit conversion ──────────────────────────────────────────────────────────
 
+# ── Tray date helpers (moved out of incubation_app.py) ───────────────────────
+
+def test_parse_date_loose_formats():
+    assert calc._parse_date_loose("2026-07-19").isoformat() == "2026-07-19"
+    assert calc._parse_date_loose("07/19/2026").isoformat() == "2026-07-19"
+    assert calc._parse_date_loose("2026-07-19T13:45:00").isoformat() == "2026-07-19"
+    assert calc._parse_date_loose(None) is None
+    assert calc._parse_date_loose("") is None
+    assert calc._parse_date_loose("garbage") is None
+
+
+def test_cool_down_days_counts_from_cool_date():
+    cooled = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    # Still cooling -> counts up to today
+    assert calc.cool_down_days({"cool_date": cooled, "status": "cooled"}) == 3
+    # Released -> counts to the out_date
+    out = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    assert calc.cool_down_days(
+        {"cool_date": cooled, "status": "released", "out_date": out}) == 2
+    # Not applicable
+    assert calc.cool_down_days({"cool_date": None, "status": "cooled"}) is None
+    assert calc.cool_down_days({"cool_date": cooled, "status": "active"}) is None
+
+
 def test_unit_conversion_roundtrip():
     assert calc.c_to_f(0) == 32.0
     assert calc.c_to_f(100) == 212.0
