@@ -2,3 +2,11 @@ pi/*.py text eol=lf
 pi/*.service text eol=lf
 pi/*.example text eol=lf
 pi/*.md text eol=lf
+
+# Binary assets — never apply line-ending conversion (it corrupts them)
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.db  binary
