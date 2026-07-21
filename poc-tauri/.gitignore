@@ -1,0 +1,11 @@
+# Node / Vite
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Tauri / Rust build output
+frontend/src-tauri/target/
+frontend/src-tauri/gen/
+
+# Python
+backend/__pycache__/
