@@ -14,7 +14,7 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 # ── Version ─────────────────────────────────────────────────────────────────
-APP_VERSION = "1.47.1"   # bump on every push (semver: MAJOR.MINOR.PATCH)
+APP_VERSION = "1.48.0"   # bump on every push (semver: MAJOR.MINOR.PATCH)
 
 
 def _git_revision() -> str:

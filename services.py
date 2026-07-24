@@ -135,6 +135,14 @@ class ServicesMixin:
                         self._check_db_conflicts()     # hourly
                     if cycle % 72 == 0:                # ~every 12 h (and at startup)
                         self._run_db_backup()
+                    # Push any new alerts to phones/email (once each)
+                    try:
+                        import email_reporter
+                        sent = email_reporter.dispatch_alerts()
+                        if sent:
+                            print(f"[AlertChecker] notified {sent} new alert(s)")
+                    except Exception as exc:
+                        print(f"[AlertChecker] notify failed: {exc}")
                 except Exception as exc:
                     print(f"[AlertChecker] {exc}")
                 cycle += 1
@@ -323,6 +331,40 @@ class ServicesMixin:
                         text=f"Failed: {err}", text_color=RED)
                 else:
                     self._email_status_lbl.configure(
+                        text=f"Sent to {len(recipients)} recipient(s) ✓",
+                        text_color=GREEN)
+            self.after(0, _done)
+
+        threading.Thread(target=_send, daemon=True).start()
+
+    def _send_test_alert(self):
+        """Send a test alert notification (text/email) using saved settings."""
+        recipients = email_reporter.get_alert_recipients()
+        if not recipients:
+            self._alert_status_lbl.configure(
+                text="No recipients — add an email/SMS address and Save Settings.",
+                text_color=ORANGE)
+            return
+        if not email_reporter.smtp_configured():
+            self._alert_status_lbl.configure(
+                text="SMTP host and username are required — Save Settings first.",
+                text_color=ORANGE)
+            return
+        self._alert_status_lbl.configure(text="Sending…", text_color=SUBTEXT)
+        self.update_idletasks()
+
+        def _send():
+            err = email_reporter.send_message(
+                "Bee Incubation: test alert",
+                "This is a test alert from the Bee Incubation Manager. "
+                "If you received this, real alerts will reach you here.",
+                recipients)
+            def _done():
+                if err:
+                    self._alert_status_lbl.configure(
+                        text=f"Failed: {err}", text_color=RED)
+                else:
+                    self._alert_status_lbl.configure(
                         text=f"Sent to {len(recipients)} recipient(s) ✓",
                         text_color=GREEN)
             self.after(0, _done)

@@ -234,6 +234,7 @@ def init_db():
         conn.execute("UPDATE temp_humidity_readings SET is_downsampled=0 WHERE is_downsampled IS NULL")
         # Key used to suppress repeated/duplicate alerts
         _safe_add_column(conn, "alerts", "dedup_key", "TEXT")
+        _safe_add_column(conn, "alerts", "notified",  "INTEGER DEFAULT 0")
         # Per-incubator Sensibo AC device link (manual on/off/temp control)
         _safe_add_column(conn, "incubators", "sensibo_device_id", "TEXT DEFAULT ''")
         # Explicit incubation start date for the Timeline day-grid (overrides
@@ -1269,6 +1270,28 @@ def get_active_alerts() -> list:
                WHERE a.acknowledged=0
                ORDER BY a.triggered_at DESC"""
         ).fetchall()]
+
+
+def get_unnotified_alerts() -> list:
+    """Active alerts that haven't yet triggered a phone/email notification."""
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            """SELECT a.*, i.name AS incubator_name
+               FROM alerts a
+               LEFT JOIN incubators i ON a.incubator_id = i.id
+               WHERE a.acknowledged=0 AND IFNULL(a.notified,0)=0
+               ORDER BY a.triggered_at"""
+        ).fetchall()]
+
+
+def mark_alerts_notified(alert_ids: list):
+    if not alert_ids:
+        return
+    placeholders = ",".join("?" * len(alert_ids))
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE alerts SET notified=1 WHERE id IN ({placeholders})",
+            list(alert_ids))
 
 
 def acknowledge_alert(alert_id: int):

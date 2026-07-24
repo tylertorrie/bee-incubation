@@ -316,6 +316,41 @@ class SettingsViewMixin:
              width=150, height=30).pack(side="left", padx=(0, 10))
         self._email_status_lbl.pack(side="left")
 
+        # ── Alert Notifications (text / email) ────────────────────────────
+        af = ctk.CTkFrame(scroll, fg_color=PANEL, corner_radius=12,
+                          border_width=1, border_color=BORDER2)
+        af.pack(fill="x", padx=4, pady=(8, 4))
+        _label(af, "Alert Notifications", ("Segoe UI", 13, "bold"), GOLD).pack(
+            anchor="w", padx=18, pady=(14, 2))
+        _label(af,
+               "Get a text or email the moment an alert fires (temperature out of "
+               "range, a Vapona sensor offline, etc.). Uses the SMTP settings above.\n"
+               "For a TEXT, add your carrier's email-to-SMS address, e.g. "
+               "5551234567@vtext.com (Verizon), @txt.att.net (AT&T), "
+               "@tmomail.net (T-Mobile). Leave blank to reuse the report recipients.",
+               FONT_S, SUBTEXT).pack(anchor="w", padx=14, pady=(0, 8))
+
+        ag = ctk.CTkFrame(af, fg_color=CARD2, corner_radius=8)
+        ag.pack(fill="x", padx=14, pady=(0, 14))
+        ag.columnconfigure(1, weight=1)
+
+        self._set["alert_notify_enabled"] = _FormRow(ag, 0, "Enabled (1=yes, 0=no)", "1", 60)
+
+        _label(ag, "Send to\n(email or SMS\ngateway, one\nper line)", FONT_S, SUBTEXT).grid(
+            row=1, column=0, sticky="ne", padx=(14, 8), pady=8)
+        self._alert_recip_box = ctk.CTkTextbox(
+            ag, height=80, fg_color=CARD, border_color=BORDER,
+            text_color=TEXT, font=FONT_S, corner_radius=6)
+        self._alert_recip_box.grid(row=1, column=1, sticky="ew", padx=(0, 14), pady=8)
+
+        alert_btn_row = ctk.CTkFrame(ag, fg_color="transparent")
+        alert_btn_row.grid(row=2, column=1, sticky="w", padx=(0, 14), pady=(0, 10))
+        self._alert_status_lbl = _label(alert_btn_row, "", FONT_S, SUBTEXT)
+        _btn(alert_btn_row, "Send Test Alert", self._send_test_alert,
+             fg=BLUE, hover="#1D4ED8", text_color="white",
+             width=150, height=30).pack(side="left", padx=(0, 10))
+        self._alert_status_lbl.pack(side="left")
+
         return frame
 
     def _refresh_settings(self):
@@ -325,7 +360,7 @@ class SettingsViewMixin:
                 "smtp_host", "smtp_port", "smtp_tls",
                 "smtp_username", "smtp_password", "smtp_from",
                 "gcal_credentials_path", "gcal_calendar_id", "gcal_enabled",
-                "dev_base_temp_c", "dev_target_degree_days"]
+                "dev_base_temp_c", "dev_target_degree_days", "alert_notify_enabled"]
         for k in keys:
             if k in self._set:
                 self._set[k].set(db.get_setting(k))
@@ -336,6 +371,11 @@ class SettingsViewMixin:
         self._email_recip_box.delete("1.0", "end")
         if recip_val:
             self._email_recip_box.insert("1.0", recip_val)
+        # Alert-notification recipients
+        alert_val = db.get_setting("alert_recipients", "")
+        self._alert_recip_box.delete("1.0", "end")
+        if alert_val:
+            self._alert_recip_box.insert("1.0", alert_val)
         # Reload per-mode goals (in case another computer changed them)
         for _mk, (_te, _he) in getattr(self, "_goal_entries", {}).items():
             _gt, _gh = db.get_mode_goals(_mk)
@@ -349,13 +389,15 @@ class SettingsViewMixin:
                 "smtp_host", "smtp_port", "smtp_tls",
                 "smtp_username", "smtp_password", "smtp_from",
                 "gcal_credentials_path", "gcal_calendar_id", "gcal_enabled",
-                "dev_base_temp_c", "dev_target_degree_days"]
+                "dev_base_temp_c", "dev_target_degree_days", "alert_notify_enabled"]
         for k in keys:
             if k in self._set:
                 db.set_setting(k, self._set[k].get())
         # Save recipients
         recip_text = self._email_recip_box.get("1.0", "end").strip()
         db.set_setting("email_recipients", recip_text)
+        db.set_setting("alert_recipients",
+                       self._alert_recip_box.get("1.0", "end").strip())
         # Per-mode temperature/humidity goals
         for _mk, (_te, _he) in getattr(self, "_goal_entries", {}).items():
             db.set_mode_goals(_mk, _te.get().strip(), _he.get().strip())

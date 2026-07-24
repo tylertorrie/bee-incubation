@@ -49,6 +49,80 @@ def smtp_configured() -> bool:
     return bool(db.get_setting("smtp_host") and db.get_setting("smtp_username"))
 
 
+def _parse_addr_list(raw: str) -> list:
+    """Split a newline/comma separated address list. Accepts real email
+    addresses AND carrier email-to-SMS gateway addresses (both contain '@')."""
+    addrs = [a.strip() for line in (raw or "").splitlines() for a in line.split(",")]
+    return [a for a in addrs if "@" in a]
+
+
+def get_alert_recipients() -> list:
+    """Who gets real-time alert notifications. Falls back to the daily-report
+    recipients if no dedicated alert list is set."""
+    lst = _parse_addr_list(db.get_setting("alert_recipients", ""))
+    return lst or get_recipients()
+
+
+def notifications_enabled() -> bool:
+    return db.get_setting("alert_notify_enabled", "1") == "1"
+
+
+def send_message(subject: str, body: str, recipients: list, html: str = None) -> str:
+    """Send a plain-text (optionally multipart) message via the configured SMTP.
+    Returns '' on success or an error string. Reused for alerts and test sends."""
+    if not recipients:
+        return "No recipients configured."
+    cfg = _smtp_cfg()
+    if not cfg["host"] or not cfg["username"]:
+        return "SMTP not configured — set host and username in Settings."
+    if html:
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        msg.attach(MIMEText(html, "html", "utf-8"))
+    else:
+        msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"]    = cfg["from"] or cfg["username"]
+    msg["To"]      = ", ".join(recipients)
+    try:
+        if cfg["tls"]:
+            smtp = smtplib.SMTP(cfg["host"], cfg["port"], timeout=20)
+            smtp.ehlo(); smtp.starttls(); smtp.ehlo()
+        else:
+            smtp = smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=20)
+        smtp.login(cfg["username"], cfg["password"])
+        smtp.sendmail(msg["From"], recipients, msg.as_string())
+        smtp.quit()
+        return ""
+    except Exception as exc:
+        return str(exc)
+
+
+def dispatch_alerts() -> int:
+    """Send one concise notification for any active, not-yet-notified alerts,
+    then mark them notified so they never re-send. Short body so it fits an SMS.
+    Returns the number of alerts included (0 if nothing sent)."""
+    if not notifications_enabled():
+        return 0
+    alerts = db.get_unnotified_alerts()
+    if not alerts:
+        return 0
+    recipients = get_alert_recipients()
+    if not recipients or not smtp_configured():
+        return 0
+    n = len(alerts)
+    subject = f"Bee Incubation: {n} alert{'s' if n != 1 else ''}"
+    lines = []
+    for a in alerts:
+        inc = a.get("incubator_name")
+        lines.append(f"- {('[' + inc + '] ') if inc else ''}{a['message']}")
+    body = subject + "\n\n" + "\n".join(lines)
+    if send_message(subject, body, recipients):
+        return 0   # send failed — leave them un-notified to retry next cycle
+    db.mark_alerts_notified([a["id"] for a in alerts])
+    return n
+
+
 def _smtp_cfg() -> dict:
     return {
         "host":     db.get_setting("smtp_host",     "smtp.gmail.com"),
